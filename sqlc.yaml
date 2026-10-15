@@ -19,3 +19,24 @@ sql:
             go_type:
               import: test-task-dellos/internal/money
               type: Amount
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/processing/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: processingdb
+        out: internal/processing/processingdb
+        sql_package: pgx/v5
+        emit_methods_with_db_argument: false
+        emit_enum_valid_method: true
+        emit_all_enum_values: true
+        overrides:
+          - column: deposits.amount
+            go_type:
+              import: test-task-dellos/internal/money
+              type: Amount
+          - column: refunds.amount
+            go_type:
+              import: test-task-dellos/internal/money
+              type: Amount
