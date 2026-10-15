@@ -18,8 +18,6 @@ import (
 
 const zeroHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
-var ErrBlockNotFound = errors.New("block not found")
-
 type block struct {
 	number    uint64
 	hash      string
@@ -85,7 +83,7 @@ func (s *Simulator) BlockHash(_ context.Context, number uint64) (string, error) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if number >= uint64(len(s.blocks)) {
-		return "", ErrBlockNotFound
+		return "", chain.ErrBlockNotFound
 	}
 	return s.blocks[number].hash, nil
 }

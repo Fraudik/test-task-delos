@@ -2,8 +2,11 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"math/big"
 )
+
+var ErrBlockNotFound = errors.New("block not found")
 
 type Transfer struct {
 	TxHash      string
