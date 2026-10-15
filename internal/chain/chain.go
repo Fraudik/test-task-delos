@@ -3,7 +3,8 @@ package chain
 import (
 	"context"
 	"errors"
-	"math/big"
+
+	"test-task-dellos/internal/money"
 )
 
 var ErrBlockNotFound = errors.New("block not found")
@@ -15,7 +16,7 @@ type Transfer struct {
 	BlockHash   string
 	From        string
 	To          string
-	Value       *big.Int
+	Value       money.Amount
 }
 
 // Client is the read-only view of the chain

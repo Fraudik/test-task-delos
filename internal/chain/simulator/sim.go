@@ -10,10 +10,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 	"sync"
 
 	"test-task-dellos/internal/chain"
+	"test-task-dellos/internal/money"
 )
 
 const zeroHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -50,16 +50,10 @@ func (s *Simulator) createBlock(trans []chain.Transfer) *block {
 		t.BlockNumber = b.number
 		t.BlockHash = b.hash
 		t.LogIndex = uint32(i)
-		b.transfers = append(b.transfers, copyTransfer(t))
+		b.transfers = append(b.transfers, t)
 	}
 	s.blocks = append(s.blocks, b)
 	return b
-}
-
-// copyTransfer returns a copy of t with its own Value so callers can't mutate simulator state.
-func copyTransfer(t chain.Transfer) chain.Transfer {
-	t.Value = new(big.Int).Set(t.Value)
-	return t
 }
 
 func (s *Simulator) headLocked() uint64 { return s.blocks[len(s.blocks)-1].number }
@@ -94,15 +88,13 @@ func (s *Simulator) GetTransfers(_ context.Context, from, to uint64) ([]chain.Tr
 	defer s.mu.RUnlock()
 	var out []chain.Transfer
 	for n := from; n <= to && n < uint64(len(s.blocks)); n++ {
-		for _, t := range s.blocks[n].transfers {
-			out = append(out, copyTransfer(t))
-		}
+		out = append(out, s.blocks[n].transfers...)
 	}
 	return out, nil
 }
 
-func (s *Simulator) SendTransfer(from, to string, value *big.Int) (chain.Transfer, error) {
-	if value == nil || value.Sign() <= 0 {
+func (s *Simulator) SendTransfer(from, to string, value money.Amount) (chain.Transfer, error) {
+	if value <= 0 {
 		return chain.Transfer{}, errors.New("simulator: amount must be positive")
 	}
 	s.mu.Lock()
@@ -114,7 +106,7 @@ func (s *Simulator) SendTransfer(from, to string, value *big.Int) (chain.Transfe
 		Value:  value,
 	}
 	b := s.createBlock([]chain.Transfer{t})
-	return copyTransfer(b.transfers[0]), nil
+	return b.transfers[0], nil
 }
 
 // AddBlocks adds empty blocks for confirmation simulation

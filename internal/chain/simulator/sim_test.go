@@ -2,11 +2,11 @@ package simulator
 
 import (
 	"errors"
-	"math/big"
 	"sync"
 	"testing"
 
 	"test-task-dellos/internal/chain"
+	"test-task-dellos/internal/money"
 )
 
 // Проверка соответствия интерфейсу
@@ -39,9 +39,9 @@ func mustTransfers(t *testing.T, s *Simulator, from, to uint64) []chain.Transfer
 	return trs
 }
 
-func mustSend(t *testing.T, s *Simulator, from, to string, value int64) chain.Transfer {
+func mustSend(t *testing.T, s *Simulator, from, to string, value money.Amount) chain.Transfer {
 	t.Helper()
-	tr, err := s.SendTransfer(from, to, big.NewInt(value))
+	tr, err := s.SendTransfer(from, to, value)
 	if err != nil {
 		t.Fatalf("SendTransfer: %v", err)
 	}
@@ -156,13 +156,13 @@ func TestGetTransfers(t *testing.T) {
 func TestSendTransfer(t *testing.T) {
 	t.Run("mines transfer into new block", func(t *testing.T) {
 		s := New()
-		tr := mustSend(t, s, "0xfrom", "0xto", 1_000_000)
+		tr := mustSend(t, s, "0xfrom", "0xto", money.OneUSDT)
 
 		if tr.From != "0xfrom" || tr.To != "0xto" {
 			t.Errorf("from/to = %s/%s, want 0xfrom/0xto", tr.From, tr.To)
 		}
-		if tr.Value.Int64() != 1_000_000 {
-			t.Errorf("value = %s, want 1000000", tr.Value)
+		if tr.Value != money.OneUSDT {
+			t.Errorf("value = %s, want %s", tr.Value, money.OneUSDT)
 		}
 		if tr.TxHash == "" {
 			t.Error("empty tx hash")
@@ -175,25 +175,8 @@ func TestSendTransfer(t *testing.T) {
 		}
 
 		trs := mustTransfers(t, s, tr.BlockNumber, tr.BlockNumber)
-		if len(trs) != 1 || trs[0].TxHash != tr.TxHash {
-			t.Fatalf("block transfers = %+v, want only %s", trs, tr.TxHash)
-		}
-		if trs[0].BlockHash != tr.BlockHash || trs[0].Value.Cmp(tr.Value) != 0 {
-			t.Errorf("stored transfer = %+v, want %+v", trs[0], tr)
-		}
-	})
-
-	t.Run("copies input value", func(t *testing.T) {
-		s := New()
-		value := big.NewInt(42)
-		tr, err := s.SendTransfer("a", "b", value)
-		if err != nil {
-			t.Fatalf("SendTransfer: %v", err)
-		}
-		value.SetInt64(7)
-
-		if got := mustTransfers(t, s, tr.BlockNumber, tr.BlockNumber)[0].Value.Int64(); got != 42 {
-			t.Errorf("stored value = %d after caller mutated input, want 42", got)
+		if len(trs) != 1 || trs[0] != tr {
+			t.Fatalf("block transfers = %+v, want only %+v", trs, tr)
 		}
 	})
 
@@ -210,10 +193,9 @@ func TestSendTransfer(t *testing.T) {
 	})
 
 	t.Run("rejects non-positive value", func(t *testing.T) {
-		for name, v := range map[string]*big.Int{
-			"nil":      nil,
-			"zero":     big.NewInt(0),
-			"negative": big.NewInt(-1),
+		for name, v := range map[string]money.Amount{
+			"zero":     0,
+			"negative": -1,
 		} {
 			s := New()
 			if _, err := s.SendTransfer("a", "b", v); err == nil {
@@ -333,23 +315,16 @@ func TestReorg(t *testing.T) {
 func TestReturnedDataIsCopy(t *testing.T) {
 	s := New()
 	sent := mustSend(t, s, "a", "b", 100)
-	sent.Value.SetInt64(1)
 
+	// The returned slice must not share its backing array with the simulator.
 	got := mustTransfers(t, s, sent.BlockNumber, sent.BlockNumber)
-	got[0].Value.SetInt64(2)
+	got[0].Value = 2
 	got[0].To = "mallory"
 	got[0] = chain.Transfer{}
 
 	trs := mustTransfers(t, s, sent.BlockNumber, sent.BlockNumber)
-	if len(trs) != 1 {
-		t.Fatalf("block has %d transfers, want 1", len(trs))
-	}
-	tr := trs[0]
-	if tr.Value == nil || tr.Value.Int64() != 100 {
-		t.Errorf("stored value = %s, want 100", tr.Value)
-	}
-	if tr.To != "b" || tr.TxHash != sent.TxHash {
-		t.Errorf("stored transfer = %+v, want To=b TxHash=%s", tr, sent.TxHash)
+	if len(trs) != 1 || trs[0] != sent {
+		t.Errorf("stored transfers = %+v, want only %+v", trs, sent)
 	}
 }
 
@@ -360,7 +335,7 @@ func TestConcurrentAccess(t *testing.T) {
 	for range 4 {
 		wg.Go(func() {
 			for range 50 {
-				if _, err := s.SendTransfer("a", "b", big.NewInt(1)); err != nil {
+				if _, err := s.SendTransfer("a", "b", 1); err != nil {
 					t.Error(err)
 					return
 				}

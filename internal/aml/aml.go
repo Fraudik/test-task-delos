@@ -3,7 +3,8 @@ package aml
 import (
 	"context"
 	"errors"
-	"math/big"
+
+	"test-task-dellos/internal/money"
 )
 
 var ErrUnavailable = errors.New("aml: provider unavailable")
@@ -12,7 +13,7 @@ type Request struct {
 	TxHash string
 	From   string
 	To     string
-	Amount *big.Int
+	Amount money.Amount
 }
 
 type Risk string
