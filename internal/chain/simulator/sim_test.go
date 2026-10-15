@@ -162,7 +162,7 @@ func TestSendTransfer(t *testing.T) {
 			t.Errorf("from/to = %s/%s, want 0xfrom/0xto", tr.From, tr.To)
 		}
 		if tr.Value != money.OneUSDT {
-			t.Errorf("value = %s, want %s", tr.Value, money.OneUSDT)
+			t.Errorf("value = %d, want %d", tr.Value, money.OneUSDT)
 		}
 		if tr.TxHash == "" {
 			t.Error("empty tx hash")

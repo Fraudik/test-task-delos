@@ -1,0 +1,21 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/ledger/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: ledgerdb
+        out: internal/ledger/ledgerdb
+        sql_package: pgx/v5
+        emit_methods_with_db_argument: false
+        overrides:
+          - column: ledger_accounts.balance
+            go_type:
+              import: test-task-dellos/internal/money
+              type: Amount
+          - column: ledger_entries.amount
+            go_type:
+              import: test-task-dellos/internal/money
+              type: Amount
