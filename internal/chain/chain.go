@@ -5,13 +5,6 @@ import (
 	"math/big"
 )
 
-type Block struct {
-	Number    uint64
-	Hash      string
-	Parent    string
-	Transfers []Transfer
-}
-
 type Transfer struct {
 	TxHash      string
 	LogIndex    uint32
@@ -24,6 +17,7 @@ type Transfer struct {
 
 // Client is the read-only view of the chain
 type Client interface {
-	HeadBlock(ctx context.Context) (Block, error)
-	BlockByNumber(ctx context.Context, number uint64) (Block, error)
+	HeadBlock(ctx context.Context) (uint64, error)
+	BlockHash(ctx context.Context, number uint64) (string, error)
+	GetTransfers(ctx context.Context, from, to uint64) ([]Transfer, error)
 }

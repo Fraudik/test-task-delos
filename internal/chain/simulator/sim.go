@@ -20,9 +20,16 @@ const zeroHash = "0x000000000000000000000000000000000000000000000000000000000000
 
 var ErrBlockNotFound = errors.New("block not found")
 
+type block struct {
+	number    uint64
+	hash      string
+	parent    string
+	transfers []chain.Transfer
+}
+
 type Simulator struct {
 	mu      sync.RWMutex
-	blocks  []*chain.Block
+	blocks  []*block
 	counter uint64
 }
 
@@ -34,25 +41,30 @@ func (s *Simulator) nextHash(kind string) string {
 
 func New() *Simulator {
 	s := &Simulator{}
-	s.blocks = []*chain.Block{{Number: 0, Hash: s.nextHash("block"), Parent: zeroHash}}
+	s.blocks = []*block{{number: 0, hash: s.nextHash("block"), parent: zeroHash}}
 	return s
 }
 
-func (s *Simulator) createBlock(trans []chain.Transfer) *chain.Block {
+func (s *Simulator) createBlock(trans []chain.Transfer) *block {
 	parent := s.blocks[len(s.blocks)-1]
-	b := &chain.Block{Number: parent.Number + 1, Hash: s.nextHash("block"), Parent: parent.Hash}
+	b := &block{number: parent.number + 1, hash: s.nextHash("block"), parent: parent.hash}
 	for i, t := range trans {
-		t.BlockNumber = b.Number
-		t.BlockHash = b.Hash
+		t.BlockNumber = b.number
+		t.BlockHash = b.hash
 		t.LogIndex = uint32(i)
-		t.Value = new(big.Int).Set(t.Value)
-		b.Transfers = append(b.Transfers, t)
+		b.transfers = append(b.transfers, copyTransfer(t))
 	}
 	s.blocks = append(s.blocks, b)
 	return b
 }
 
-func (s *Simulator) headLocked() uint64 { return s.blocks[len(s.blocks)-1].Number }
+// copyTransfer returns a copy of t with its own Value so callers can't mutate simulator state.
+func copyTransfer(t chain.Transfer) chain.Transfer {
+	t.Value = new(big.Int).Set(t.Value)
+	return t
+}
+
+func (s *Simulator) headLocked() uint64 { return s.blocks[len(s.blocks)-1].number }
 
 func (s *Simulator) addBlocksLocked(n int) uint64 {
 	for range n {
@@ -61,19 +73,34 @@ func (s *Simulator) addBlocksLocked(n int) uint64 {
 	return s.headLocked()
 }
 
-func (s *Simulator) HeadBlock(_ context.Context) (chain.Block, error) {
+// HeadBlock returns the number of the latest block
+func (s *Simulator) HeadBlock(_ context.Context) (uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return *s.blocks[len(s.blocks)-1], nil
+	return s.headLocked(), nil
 }
 
-func (s *Simulator) BlockByNumber(_ context.Context, number uint64) (chain.Block, error) {
+// BlockHash returns the hash of the canonical block at the given height
+func (s *Simulator) BlockHash(_ context.Context, number uint64) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if number >= uint64(len(s.blocks)) {
-		return chain.Block{}, ErrBlockNotFound
+		return "", ErrBlockNotFound
 	}
-	return *s.blocks[number], nil
+	return s.blocks[number].hash, nil
+}
+
+// GetTransfers returns transfers from canonical blocks in [from, to]; heights above head are skipped
+func (s *Simulator) GetTransfers(_ context.Context, from, to uint64) ([]chain.Transfer, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []chain.Transfer
+	for n := from; n <= to && n < uint64(len(s.blocks)); n++ {
+		for _, t := range s.blocks[n].transfers {
+			out = append(out, copyTransfer(t))
+		}
+	}
+	return out, nil
 }
 
 func (s *Simulator) SendTransfer(from, to string, value *big.Int) (chain.Transfer, error) {
@@ -86,10 +113,10 @@ func (s *Simulator) SendTransfer(from, to string, value *big.Int) (chain.Transfe
 		TxHash: s.nextHash("tx"),
 		From:   from,
 		To:     to,
-		Value:  new(big.Int).Set(value),
+		Value:  value,
 	}
 	b := s.createBlock([]chain.Transfer{t})
-	return b.Transfers[0], nil
+	return copyTransfer(b.transfers[0]), nil
 }
 
 // AddBlocks adds empty blocks for confirmation simulation
