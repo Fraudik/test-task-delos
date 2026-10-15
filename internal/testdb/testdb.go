@@ -3,8 +3,11 @@ package testdb
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sync"
 	"testing"
@@ -119,6 +122,12 @@ func New(t testing.TB) *pgxpool.Pool {
 }
 
 func ensureTemplate(ctx context.Context, t testing.TB, adminURL string) (string, error) {
+	hash, err := migrationsHash()
+	if err != nil {
+		return "", err
+	}
+	name := "testdb_template_" + hash[:16]
+
 	conn, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
 		return "", fmt.Errorf("connect: %w", err)
@@ -129,7 +138,19 @@ func ensureTemplate(ctx context.Context, t testing.TB, adminURL string) (string,
 		return "", fmt.Errorf("lock: %w", err)
 	}
 
-	name := "testdb_template"
+	var ready bool
+	err = conn.QueryRow(ctx, `SELECT datistemplate FROM pg_database WHERE datname = $1`, name).Scan(&ready)
+	switch {
+	case err == nil && ready:
+		return name, nil
+	case err == nil:
+		if _, err := conn.Exec(ctx, "DROP DATABASE "+ident(name)+" WITH (FORCE)"); err != nil {
+			return "", fmt.Errorf("drop incomplete template: %w", err)
+		}
+	case !errors.Is(err, pgx.ErrNoRows):
+		return "", fmt.Errorf("look up template: %w", err)
+	}
+
 	if _, err := conn.Exec(ctx, "CREATE DATABASE "+ident(name)); err != nil {
 		return "", fmt.Errorf("create template: %w", err)
 	}
@@ -146,4 +167,28 @@ func ensureTemplate(ctx context.Context, t testing.TB, adminURL string) (string,
 		return "", fmt.Errorf("mark template: %w", err)
 	}
 	return name, nil
+}
+
+func migrationsHash() (string, error) {
+	fsys, err := postgres.Migrations()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", path, len(data))
+		h.Write(data)
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("hash migrations: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
