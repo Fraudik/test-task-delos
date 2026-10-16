@@ -3,6 +3,7 @@ package processing
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -47,8 +48,8 @@ func (c Config) validate() error {
 	if c.PollInterval <= 0 {
 		errs = append(errs, errors.New("PollInterval must be positive"))
 	}
-	if c.AMLConcurrency <= 0 {
-		errs = append(errs, errors.New("AMLConcurrency must be positive"))
+	if c.AMLConcurrency <= 0 || c.AMLConcurrency > math.MaxInt32 {
+		errs = append(errs, errors.New("AMLConcurrency must be positive and fit in int32"))
 	}
 	if c.AMLTimeout <= 0 {
 		errs = append(errs, errors.New("AMLTimeout must be positive"))

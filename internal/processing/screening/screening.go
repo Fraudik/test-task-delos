@@ -15,7 +15,6 @@ import (
 )
 
 type Config struct {
-	BatchSize   int32
 	Concurrency int
 	Timeout     time.Duration
 	Lease       time.Duration
@@ -45,7 +44,7 @@ func (s *Stage) Run(ctx context.Context) (int, error) {
 	q := screeningdb.New(s.db)
 	claimed, err := q.ClaimAMLChecks(ctx, screeningdb.ClaimAMLChecksParams{
 		LeaseSeconds: s.cfg.Lease.Seconds(),
-		MaxRows:      s.cfg.BatchSize,
+		MaxRows:      int32(s.cfg.Concurrency),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("screening: claim AML checks: %w", err)

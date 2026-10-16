@@ -732,6 +732,13 @@ func TestSettlementFlagsRejectedTransactionForReview(t *testing.T) {
 	}
 	e.assertStatus(okTr, "credited")
 	e.assertNeedsReview(badTr, ledger.ErrAccountKindMismatch)
+	var reason, invoiceID string
+	if err := e.db.QueryRow(t.Context(), `SELECT d.review_reason, d.invoice_id::text FROM deposits d WHERE d.tx_hash = $1`, badTr.TxHash).Scan(&reason, &invoiceID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reason, "invoice "+invoiceID+" settlement") {
+		t.Errorf("review reason = %q, want it to name invoice %s", reason, invoiceID)
+	}
 
 	for range 3 {
 		e.tick()
@@ -795,6 +802,27 @@ func TestConfirmationsRespectBatchSize(t *testing.T) {
 		}
 		if n != want {
 			t.Errorf("confirmed %d deposits, want %d", n, want)
+		}
+	}
+}
+
+func TestAMLClaimsAtMostConcurrencyChecks(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.AMLConcurrency = 2
+	proc := e.newProcessor()
+	pid := e.partner(0)
+	for range 5 {
+		e.send(payer, e.invoice(pid), money.OneUSDT)
+	}
+	e.step("scan", proc.ScanBlocks)
+
+	for _, want := range []int{2, 2, 1, 0} {
+		n, err := proc.ProcessAML(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != want {
+			t.Errorf("screened %d deposits, want %d", n, want)
 		}
 	}
 }

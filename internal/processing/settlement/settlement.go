@@ -87,7 +87,7 @@ func (s *Stage) Run(ctx context.Context) (int, error) {
 		for i, p := range invoices {
 			if err := results[len(refunds)+i].Err; err != nil {
 				for _, id := range p.deposits {
-					out.review.Add(id, fmt.Errorf("invoice %d settlement: %w", p.invoice.ID, err))
+					out.review.Add(id, fmt.Errorf("invoice %s settlement: %w", p.invoice.ID, err))
 				}
 				continue
 			}

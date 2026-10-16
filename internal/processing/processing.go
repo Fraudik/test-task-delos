@@ -59,7 +59,6 @@ func New(db *pgxpool.Pool, c chain.Client, checker aml.Checker, cfg Config, log 
 		BatchSize:     cfg.BatchSize,
 	}, log, wakeSettlement)
 	p.screening = screening.New(db, checker, screening.Config{
-		BatchSize:   cfg.BatchSize,
 		Concurrency: cfg.AMLConcurrency,
 		Timeout:     cfg.AMLTimeout,
 		Lease:       cfg.AMLLease,
