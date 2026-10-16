@@ -1,23 +1,35 @@
--- name: InsertTransaction :one
+-- name: InsertTransactions :many
 INSERT INTO ledger_transactions (idempotency_key, digest)
-VALUES (@idempotency_key, @digest)
+SELECT t.idempotency_key, t.digest
+FROM (SELECT unnest(@idempotency_keys::text[]) AS idempotency_key, unnest(@digests::text[]) AS digest) t
+ORDER BY t.idempotency_key
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id;
+RETURNING id, idempotency_key;
 
--- name: GetTransactionDigest :one
-SELECT digest
+-- name: GetTransactionDigests :many
+SELECT idempotency_key, digest
 FROM ledger_transactions
-WHERE idempotency_key = @idempotency_key;
+WHERE idempotency_key = ANY (@idempotency_keys::text[]);
 
--- name: EnsureAccount :exec
+-- name: EnsureAccounts :exec
 INSERT INTO ledger_accounts (id, kind)
-VALUES (@id, @kind)
+SELECT a.id, a.kind
+FROM (SELECT unnest(@ids::text[]) AS id, unnest(@kinds::text[]) AS kind) a
+ORDER BY a.id
 ON CONFLICT (id) DO NOTHING;
 
--- name: ApplyAccountDelta :execrows
-UPDATE ledger_accounts
-SET balance = balance + @delta
-WHERE id = @id AND kind = @kind;
+-- name: LockAccounts :many
+SELECT id, kind, balance
+FROM ledger_accounts
+WHERE id = ANY (@ids::text[])
+ORDER BY id
+FOR UPDATE;
+
+-- name: ApplyAccountDeltas :exec
+UPDATE ledger_accounts a
+SET balance = a.balance + d.delta
+FROM (SELECT unnest(@ids::text[]) AS id, unnest(@deltas::bigint[]) AS delta) d
+WHERE a.id = d.id;
 
 -- name: InsertEntries :copyfrom
 INSERT INTO ledger_entries (transaction_id, account_id, amount)

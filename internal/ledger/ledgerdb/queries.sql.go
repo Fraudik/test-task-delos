@@ -11,39 +11,38 @@ import (
 	"test-task-dellos/internal/money"
 )
 
-const applyAccountDelta = `-- name: ApplyAccountDelta :execrows
-UPDATE ledger_accounts
-SET balance = balance + $1
-WHERE id = $2 AND kind = $3
+const applyAccountDeltas = `-- name: ApplyAccountDeltas :exec
+UPDATE ledger_accounts a
+SET balance = a.balance + d.delta
+FROM (SELECT unnest($1::text[]) AS id, unnest($2::bigint[]) AS delta) d
+WHERE a.id = d.id
 `
 
-type ApplyAccountDeltaParams struct {
-	Delta money.Amount
-	ID    string
-	Kind  string
+type ApplyAccountDeltasParams struct {
+	Ids    []string
+	Deltas []int64
 }
 
-func (q *Queries) ApplyAccountDelta(ctx context.Context, arg ApplyAccountDeltaParams) (int64, error) {
-	result, err := q.db.Exec(ctx, applyAccountDelta, arg.Delta, arg.ID, arg.Kind)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) ApplyAccountDeltas(ctx context.Context, arg ApplyAccountDeltasParams) error {
+	_, err := q.db.Exec(ctx, applyAccountDeltas, arg.Ids, arg.Deltas)
+	return err
 }
 
-const ensureAccount = `-- name: EnsureAccount :exec
+const ensureAccounts = `-- name: EnsureAccounts :exec
 INSERT INTO ledger_accounts (id, kind)
-VALUES ($1, $2)
+SELECT a.id, a.kind
+FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS kind) a
+ORDER BY a.id
 ON CONFLICT (id) DO NOTHING
 `
 
-type EnsureAccountParams struct {
-	ID   string
-	Kind string
+type EnsureAccountsParams struct {
+	Ids   []string
+	Kinds []string
 }
 
-func (q *Queries) EnsureAccount(ctx context.Context, arg EnsureAccountParams) error {
-	_, err := q.db.Exec(ctx, ensureAccount, arg.ID, arg.Kind)
+func (q *Queries) EnsureAccounts(ctx context.Context, arg EnsureAccountsParams) error {
+	_, err := q.db.Exec(ctx, ensureAccounts, arg.Ids, arg.Kinds)
 	return err
 }
 
@@ -60,17 +59,35 @@ func (q *Queries) GetAccountBalance(ctx context.Context, id string) (money.Amoun
 	return balance, err
 }
 
-const getTransactionDigest = `-- name: GetTransactionDigest :one
-SELECT digest
+const getTransactionDigests = `-- name: GetTransactionDigests :many
+SELECT idempotency_key, digest
 FROM ledger_transactions
-WHERE idempotency_key = $1
+WHERE idempotency_key = ANY ($1::text[])
 `
 
-func (q *Queries) GetTransactionDigest(ctx context.Context, idempotencyKey string) (string, error) {
-	row := q.db.QueryRow(ctx, getTransactionDigest, idempotencyKey)
-	var digest string
-	err := row.Scan(&digest)
-	return digest, err
+type GetTransactionDigestsRow struct {
+	IdempotencyKey string
+	Digest         string
+}
+
+func (q *Queries) GetTransactionDigests(ctx context.Context, idempotencyKeys []string) ([]GetTransactionDigestsRow, error) {
+	rows, err := q.db.Query(ctx, getTransactionDigests, idempotencyKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetTransactionDigestsRow
+	for rows.Next() {
+		var i GetTransactionDigestsRow
+		if err := rows.Scan(&i.IdempotencyKey, &i.Digest); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 type InsertEntriesParams struct {
@@ -79,23 +96,43 @@ type InsertEntriesParams struct {
 	Amount        money.Amount
 }
 
-const insertTransaction = `-- name: InsertTransaction :one
+const insertTransactions = `-- name: InsertTransactions :many
 INSERT INTO ledger_transactions (idempotency_key, digest)
-VALUES ($1, $2)
+SELECT t.idempotency_key, t.digest
+FROM (SELECT unnest($1::text[]) AS idempotency_key, unnest($2::text[]) AS digest) t
+ORDER BY t.idempotency_key
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id
+RETURNING id, idempotency_key
 `
 
-type InsertTransactionParams struct {
-	IdempotencyKey string
-	Digest         string
+type InsertTransactionsParams struct {
+	IdempotencyKeys []string
+	Digests         []string
 }
 
-func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error) {
-	row := q.db.QueryRow(ctx, insertTransaction, arg.IdempotencyKey, arg.Digest)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
+type InsertTransactionsRow struct {
+	ID             int64
+	IdempotencyKey string
+}
+
+func (q *Queries) InsertTransactions(ctx context.Context, arg InsertTransactionsParams) ([]InsertTransactionsRow, error) {
+	rows, err := q.db.Query(ctx, insertTransactions, arg.IdempotencyKeys, arg.Digests)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InsertTransactionsRow
+	for rows.Next() {
+		var i InsertTransactionsRow
+		if err := rows.Scan(&i.ID, &i.IdempotencyKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const integrityReport = `-- name: IntegrityReport :one
@@ -121,4 +158,32 @@ func (q *Queries) IntegrityReport(ctx context.Context) (IntegrityReportRow, erro
 	var i IntegrityReportRow
 	err := row.Scan(&i.Total, &i.DriftedAccounts, &i.UnbalancedTransactions)
 	return i, err
+}
+
+const lockAccounts = `-- name: LockAccounts :many
+SELECT id, kind, balance
+FROM ledger_accounts
+WHERE id = ANY ($1::text[])
+ORDER BY id
+FOR UPDATE
+`
+
+func (q *Queries) LockAccounts(ctx context.Context, ids []string) ([]LedgerAccount, error) {
+	rows, err := q.db.Query(ctx, lockAccounts, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LedgerAccount
+	for rows.Next() {
+		var i LedgerAccount
+		if err := rows.Scan(&i.ID, &i.Kind, &i.Balance); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

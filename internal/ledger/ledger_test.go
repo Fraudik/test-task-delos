@@ -18,11 +18,19 @@ import (
 
 const partner = 1
 
+func postOne(ctx context.Context, db ledger.DB, key string, legs ...ledger.Leg) (bool, error) {
+	results, err := ledger.PostBatch(ctx, db, ledger.Transaction{Key: key, Legs: legs})
+	if err != nil {
+		return false, err
+	}
+	return results[0].Applied, results[0].Err
+}
+
 func post(t *testing.T, db ledger.DB, key string, legs ...ledger.Leg) bool {
 	t.Helper()
-	applied, err := ledger.Post(t.Context(), db, key, legs...)
+	applied, err := postOne(t.Context(), db, key, legs...)
 	if err != nil {
-		t.Fatalf("Post(%s): %v", key, err)
+		t.Fatalf("PostBatch(%s): %v", key, err)
 	}
 	return applied
 }
@@ -95,14 +103,14 @@ func TestDepositSettleAndRefund(t *testing.T) {
 		ledger.Leg{Debit: hold, Credit: available, Amount: 98_500_000},
 		ledger.Leg{Debit: hold, Credit: ledger.Fees, Amount: 1_500_000},
 	)
-	post(t, db, "deposit:2:refund", ledger.Leg{Debit: hold, Credit: ledger.RefundsPending, Amount: 50 * money.OneUSDT})
+	post(t, db, "deposit:2:refund", ledger.Leg{Debit: hold, Credit: ledger.RefundPending, Amount: 50 * money.OneUSDT})
 
 	assertBalances(t, db, map[ledger.Account]money.Amount{
-		ledger.Custody:        150 * money.OneUSDT,
-		hold:                  0,
-		available:             98_500_000,
-		ledger.Fees:           1_500_000,
-		ledger.RefundsPending: 50 * money.OneUSDT,
+		ledger.Custody:       150 * money.OneUSDT,
+		hold:                 0,
+		available:            98_500_000,
+		ledger.Fees:          1_500_000,
+		ledger.RefundPending: 50 * money.OneUSDT,
 	})
 }
 
@@ -117,7 +125,7 @@ func TestPostIsIdempotent(t *testing.T) {
 	}
 	assertBalances(t, db, map[ledger.Account]money.Amount{ledger.PartnerHold(partner): 10})
 
-	_, err := ledger.Post(t.Context(), db, "deposit:1:confirm", deposit(11))
+	_, err := postOne(t.Context(), db, "deposit:1:confirm", deposit(11))
 	if !errors.Is(err, ledger.ErrIdempotencyConflict) {
 		t.Errorf("Post with same key and other legs: error = %v, want ErrIdempotencyConflict", err)
 	}
@@ -155,7 +163,7 @@ func TestPostValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := ledger.Post(t.Context(), db, tt.key, tt.legs...); !errors.Is(err, tt.want) {
+			if _, err := postOne(t.Context(), db, tt.key, tt.legs...); !errors.Is(err, tt.want) {
 				t.Errorf("error = %v, want %v", err, tt.want)
 			}
 		})
@@ -174,7 +182,7 @@ func TestInsufficientFunds(t *testing.T) {
 		{Debit: hold, Credit: available, Amount: 90},
 		{Debit: hold, Credit: ledger.Fees, Amount: 20},
 	}
-	_, err := ledger.Post(t.Context(), db, "deposit:1:settle", settle...)
+	_, err := postOne(t.Context(), db, "deposit:1:settle", settle...)
 	if !errors.Is(err, ledger.ErrInsufficientFunds) {
 		t.Fatalf("error = %v, want ErrInsufficientFunds", err)
 	}
@@ -186,7 +194,7 @@ func TestInsufficientFunds(t *testing.T) {
 	}
 	assertBalances(t, db, map[ledger.Account]money.Amount{hold: 0, available: 90, ledger.Fees: 10})
 
-	_, err = ledger.Post(t.Context(), db, "withdraw", ledger.Leg{Debit: ledger.PartnerHold(2), Credit: ledger.Custody, Amount: 1})
+	_, err = postOne(t.Context(), db, "withdraw", ledger.Leg{Debit: ledger.PartnerHold(2), Credit: ledger.Custody, Amount: 1})
 	if !errors.Is(err, ledger.ErrInsufficientFunds) {
 		t.Errorf("debit from new account: error = %v, want ErrInsufficientFunds", err)
 	}
@@ -207,7 +215,7 @@ func TestPostJoinsOuterTransaction(t *testing.T) {
 	assertBalances(t, db, map[ledger.Account]money.Amount{hold: 0})
 
 	err = pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error {
-		_, err := ledger.Post(t.Context(), tx, "deposit:1:confirm", deposit(100))
+		_, err := postOne(t.Context(), tx, "deposit:1:confirm", deposit(100))
 		return err
 	})
 	if err != nil {
@@ -234,7 +242,7 @@ func TestConcurrentPostSameKey(t *testing.T) {
 
 	for range 20 {
 		wg.Go(func() {
-			ok, err := ledger.Post(context.Background(), db, "deposit:1:confirm", deposit(100))
+			ok, err := postOne(context.Background(), db, "deposit:1:confirm", deposit(100))
 			if err != nil {
 				t.Error(err)
 			}
@@ -264,7 +272,7 @@ func TestConcurrentCrossPostsDoNotDeadlock(t *testing.T) {
 			if i%2 == 1 {
 				from, to = b, a
 			}
-			_, err := ledger.Post(context.Background(), db, fmt.Sprintf("move:%d", i),
+			_, err := postOne(context.Background(), db, fmt.Sprintf("move:%d", i),
 				ledger.Leg{Debit: from, Credit: to, Amount: 10},
 				ledger.Leg{Debit: ledger.Custody, Credit: from, Amount: 1},
 			)
@@ -319,7 +327,7 @@ func TestAccountKindMismatch(t *testing.T) {
 	post(t, db, "deposit:1:confirm", deposit(100))
 
 	wrong := ledger.Account{ID: hold.ID, Kind: ledger.Asset}
-	_, err := ledger.Post(t.Context(), db, "bad", ledger.Leg{Debit: wrong, Credit: ledger.Fees, Amount: 10})
+	_, err := postOne(t.Context(), db, "bad", ledger.Leg{Debit: wrong, Credit: ledger.Fees, Amount: 10})
 	if !errors.Is(err, ledger.ErrAccountKindMismatch) {
 		t.Errorf("error = %v, want ErrAccountKindMismatch", err)
 	}
