@@ -67,7 +67,7 @@ balance() {
 }
 
 create_invoice() {
-	request POST /v1/invoices "$1" "" "Idempotency-Key: e2e-$RUN_ID-$2"
+	request POST /v1/invoices "$1" "{\"amount\":\"$3\"}" "Idempotency-Key: e2e-$RUN_ID-$2"
 	INVOICE_ID=$(json id)
 	INVOICE_ADDRESS=$(json address)
 }
@@ -137,25 +137,27 @@ request GET /v1/balance "" ""
 expect "no API key is rejected" "$STATUS" 401
 request GET /v1/balance "wrong-key" ""
 expect "wrong API key is rejected" "$STATUS" 401
-request POST /v1/invoices "$ACME_KEY" ""
+request POST /v1/invoices "$ACME_KEY" "{\"amount\":\"1\"}"
 expect "invoice without Idempotency-Key is rejected" "$STATUS" 400
-create_invoice "$ACME_KEY" idempotent
+create_invoice "$ACME_KEY" idempotent 100
 expect "first create returns 201" "$STATUS" 201
 first_id=$INVOICE_ID
 first_address=$INVOICE_ADDRESS
-create_invoice "$ACME_KEY" idempotent
+create_invoice "$ACME_KEY" idempotent 100
 expect "repeated create returns 200" "$STATUS" 200
 expect "repeated create returns the same invoice" "$INVOICE_ID/$INVOICE_ADDRESS" "$first_id/$first_address"
-create_invoice "$GLOBEX_KEY" idempotent
+create_invoice "$GLOBEX_KEY" idempotent 100
 [[ "$INVOICE_ID" != "$first_id" ]] && pass "same key for another partner creates another invoice" || fail "another partner reused invoice $first_id"
 request GET "/v1/invoices/$first_id" "$GLOBEX_KEY" ""
 expect "partner cannot see another partner's invoice" "$STATUS" 404
+request POST /v1/invoices "$ACME_KEY" "{\"amount\":\"200\"}" "Idempotency-Key: e2e-$RUN_ID-idempotent"
+expect "same key with another amount is a conflict" "$STATUS" 409
 
 section "Low risk: credited after $CONFIRMATIONS confirmations minus 1.5% + 0.5 USDT fee"
 balance "$ACME_KEY"
 start_available=$AVAILABLE
 start_hold=$ON_HOLD
-create_invoice "$ACME_KEY" low-risk
+create_invoice "$ACME_KEY" low-risk 100
 low_id=$INVOICE_ID
 send "$PAYER" "$INVOICE_ADDRESS" 100
 wait_invoice "$ACME_KEY" "$low_id" processing pending
@@ -171,15 +173,34 @@ balance "$ACME_KEY"
 expect "available grew by 98.000000" "$((AVAILABLE - start_available))" 98000000
 expect "nothing left on hold" "$ON_HOLD" "$start_hold"
 
+section "Invoice paid by two transfers: money stays on hold until the full amount arrives"
+balance "$ACME_KEY"
+start_available=$AVAILABLE
+start_hold=$ON_HOLD
+create_invoice "$ACME_KEY" split 100
+split_id=$INVOICE_ID
+split_address=$INVOICE_ADDRESS
+send "$PAYER" "$split_address" 60
+mine $((CONFIRMATIONS - 1))
+wait_invoice "$ACME_KEY" "$split_id" partially_paid confirmed
+expect "received 60 of 100" "$(json received)" 60.000000
+balance "$ACME_KEY"
+expect "partial payment is on hold, not available" "$((AVAILABLE - start_available))/$((ON_HOLD - start_hold))" "0/60000000"
+send "$PAYER" "$split_address" 40
+mine $((CONFIRMATIONS - 1))
+wait_invoice "$ACME_KEY" "$split_id" paid "credited credited"
+balance "$ACME_KEY"
+expect "whole invoice credited once, one fee (100 - 1.5 - 0.5)" "$((AVAILABLE - start_available))/$((ON_HOLD - start_hold))" "98000000/0"
+
 section "High risk: refund instead of credit"
 balance "$GLOBEX_KEY"
 start_available=$AVAILABLE
 start_hold=$ON_HOLD
-create_invoice "$GLOBEX_KEY" high-risk
+create_invoice "$GLOBEX_KEY" high-risk 40
 high_id=$INVOICE_ID
 send "$BLACKLISTED" "$INVOICE_ADDRESS" 40
 mine $((CONFIRMATIONS - 1))
-wait_invoice "$GLOBEX_KEY" "$high_id" refunded refunded
+wait_invoice "$GLOBEX_KEY" "$high_id" awaiting_payment refunded
 balance "$GLOBEX_KEY"
 expect "refunded payment never reaches the balance" "$AVAILABLE/$ON_HOLD" "$start_available/$start_hold"
 
@@ -188,7 +209,7 @@ balance "$ACME_KEY"
 start_available=$AVAILABLE
 start_hold=$ON_HOLD
 set_aml false
-create_invoice "$ACME_KEY" aml-outage
+create_invoice "$ACME_KEY" aml-outage 10
 outage_id=$INVOICE_ID
 send "$PAYER" "$INVOICE_ADDRESS" 10
 mine $((CONFIRMATIONS - 1))
@@ -204,7 +225,7 @@ section "Reorg before confirmations: transfer disappears, nothing credited"
 balance "$ACME_KEY"
 start_available=$AVAILABLE
 start_hold=$ON_HOLD
-create_invoice "$ACME_KEY" reorg
+create_invoice "$ACME_KEY" reorg 10
 reorg_id=$INVOICE_ID
 send "$PAYER" "$INVOICE_ADDRESS" 10
 mine 1
@@ -222,7 +243,7 @@ section "Reorg with re-inclusion: same transaction lands in a new block, credite
 balance "$ACME_KEY"
 start_available=$AVAILABLE
 start_hold=$ON_HOLD
-create_invoice "$ACME_KEY" reinclusion
+create_invoice "$ACME_KEY" reinclusion 10
 reincluded_id=$INVOICE_ID
 send "$PAYER" "$INVOICE_ADDRESS" 10
 wait_invoice "$ACME_KEY" "$reincluded_id" processing pending
@@ -249,7 +270,7 @@ balance "$ACME_KEY"
 expect "acme balance unchanged after rescan" "$AVAILABLE/$ON_HOLD" "$acme_before"
 balance "$GLOBEX_KEY"
 expect "globex balance unchanged after rescan" "$AVAILABLE/$ON_HOLD" "$globex_before"
-for pair in "$low_id:paid [credited]" "$reincluded_id:paid [credited]" "$reorg_id:awaiting_payment [orphaned]"; do
+for pair in "$low_id:paid [credited]" "$split_id:paid [credited credited]" "$reincluded_id:paid [credited]" "$reorg_id:awaiting_payment [orphaned]"; do
 	get_invoice "$ACME_KEY" "${pair%%:*}"
 	expect "invoice ${pair%%:*} unchanged after rescan" "$INVOICE_STATUS [$DEPOSITS]" "${pair#*:}"
 done
@@ -262,7 +283,7 @@ else
 	start_available=$AVAILABLE
 	start_hold=$ON_HOLD
 	set_aml false
-	create_invoice "$ACME_KEY" restart
+	create_invoice "$ACME_KEY" restart 20
 	restart_id=$INVOICE_ID
 	send "$PAYER" "$INVOICE_ADDRESS" 20
 	mine $((CONFIRMATIONS - 1))

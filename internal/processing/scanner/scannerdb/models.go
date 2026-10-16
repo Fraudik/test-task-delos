@@ -58,6 +58,48 @@ func (ns NullDepositStatus) Value() (driver.Value, error) {
 	return string(ns.DepositStatus), nil
 }
 
+type InvoiceStatus string
+
+const (
+	InvoiceStatusOpen InvoiceStatus = "open"
+	InvoiceStatusPaid InvoiceStatus = "paid"
+)
+
+func (e *InvoiceStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = InvoiceStatus(s)
+	case string:
+		*e = InvoiceStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for InvoiceStatus: %T", src)
+	}
+	return nil
+}
+
+type NullInvoiceStatus struct {
+	InvoiceStatus InvoiceStatus
+	Valid         bool // Valid is true if InvoiceStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullInvoiceStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.InvoiceStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.InvoiceStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullInvoiceStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.InvoiceStatus), nil
+}
+
 type RefundStatus string
 
 const (
@@ -108,26 +150,21 @@ type ChainCursor struct {
 }
 
 type Deposit struct {
-	ID                  int64
-	InvoiceID           int64
-	PartnerID           int64
-	TxHash              string
-	LogIndex            int32
-	BlockNumber         int64
-	BlockHash           string
-	FromAddress         string
-	ToAddress           string
-	Amount              money.Amount
-	FeeBps              int32
-	Status              DepositStatus
-	CreatedAt           pgtype.Timestamptz
-	UpdatedAt           pgtype.Timestamptz
-	FeeFixed            money.Amount
-	ReviewReason        string
-	FlaggedAt           pgtype.Timestamptz
-	NotifiedAt          pgtype.Timestamptz
-	NotifyAttempts      int32
-	NotifyNextAttemptAt pgtype.Timestamptz
+	ID           int64
+	InvoiceID    int64
+	PartnerID    int64
+	TxHash       string
+	LogIndex     int32
+	BlockNumber  int64
+	BlockHash    string
+	FromAddress  string
+	ToAddress    string
+	Amount       money.Amount
+	Status       DepositStatus
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+	ReviewReason string
+	FlaggedAt    pgtype.Timestamptz
 }
 
 type DepositAmlCheck struct {
@@ -140,11 +177,19 @@ type DepositAmlCheck struct {
 }
 
 type Invoice struct {
-	ID             int64
-	PartnerID      int64
-	Address        string
-	CreatedAt      pgtype.Timestamptz
-	IdempotencyKey pgtype.Text
+	ID                  int64
+	PartnerID           int64
+	Address             string
+	CreatedAt           pgtype.Timestamptz
+	IdempotencyKey      pgtype.Text
+	Amount              money.Amount
+	FeeBps              int32
+	FeeFixed            money.Amount
+	Status              InvoiceStatus
+	PaidAt              pgtype.Timestamptz
+	NotifiedAt          pgtype.Timestamptz
+	NotifyAttempts      int32
+	NotifyNextAttemptAt pgtype.Timestamptz
 }
 
 type LedgerAccount struct {

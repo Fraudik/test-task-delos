@@ -1,0 +1,19 @@
+---
+title: Платёж
+---
+stateDiagram-v2
+  direction LR
+  [*] --> detected: перевод найден в блоке
+  detected --> detected: AML недоступен, повтор
+  detected --> dust: сумма ниже порога
+  detected --> orphaned: реорг
+  detected --> manual_review: AML средний риск
+  manual_review --> rejected
+  manual_review --> frozen: нельзя сразу вернуть
+  detected --> rejected: AML высокий риск
+  rejected --> frozen: нельзя сразу вернуть
+  manual_review --> approved
+
+  detected --> approved: AML чистый, подтверждения набрались
+  approved --> credited: зачисление на баланс
+  rejected --> [*]: создаём возврат

@@ -57,9 +57,8 @@ func (q *Queries) GetCursor(ctx context.Context, name string) (GetCursorRow, err
 }
 
 const invoicesByAddresses = `-- name: InvoicesByAddresses :many
-SELECT i.id, i.partner_id, i.address, p.fee_bps, p.fee_fixed
+SELECT i.id, i.partner_id, i.address
 FROM invoices i
-JOIN partners p ON p.id = i.partner_id
 WHERE i.address = ANY ($1::text[])
 `
 
@@ -67,8 +66,6 @@ type InvoicesByAddressesRow struct {
 	ID        int64
 	PartnerID int64
 	Address   string
-	FeeBps    int32
-	FeeFixed  money.Amount
 }
 
 func (q *Queries) InvoicesByAddresses(ctx context.Context, addresses []string) ([]InvoicesByAddressesRow, error) {
@@ -80,13 +77,7 @@ func (q *Queries) InvoicesByAddresses(ctx context.Context, addresses []string) (
 	var items []InvoicesByAddressesRow
 	for rows.Next() {
 		var i InvoicesByAddressesRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.PartnerID,
-			&i.Address,
-			&i.FeeBps,
-			&i.FeeFixed,
-		); err != nil {
+		if err := rows.Scan(&i.ID, &i.PartnerID, &i.Address); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -169,11 +160,11 @@ func (q *Queries) SaveCursor(ctx context.Context, arg SaveCursorParams) error {
 const upsertDeposit = `-- name: UpsertDeposit :one
 INSERT INTO deposits (
     invoice_id, partner_id, tx_hash, log_index, block_number, block_hash,
-    from_address, to_address, amount, fee_bps, fee_fixed
+    from_address, to_address, amount
 )
 VALUES (
     $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $10, $11
+    $7, $8, $9
 )
 ON CONFLICT (tx_hash, log_index) DO UPDATE
 SET block_number = EXCLUDED.block_number,
@@ -195,8 +186,6 @@ type UpsertDepositParams struct {
 	FromAddress string
 	ToAddress   string
 	Amount      money.Amount
-	FeeBps      int32
-	FeeFixed    money.Amount
 }
 
 func (q *Queries) UpsertDeposit(ctx context.Context, arg UpsertDepositParams) (int64, error) {
@@ -210,8 +199,6 @@ func (q *Queries) UpsertDeposit(ctx context.Context, arg UpsertDepositParams) (i
 		arg.FromAddress,
 		arg.ToAddress,
 		arg.Amount,
-		arg.FeeBps,
-		arg.FeeFixed,
 	)
 	var id int64
 	err := row.Scan(&id)

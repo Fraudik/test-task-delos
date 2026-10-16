@@ -205,8 +205,6 @@ func (s *Stage) recordDeposits(ctx context.Context, q *scannerdb.Queries, transf
 			FromAddress: strings.ToLower(t.From),
 			ToAddress:   inv.Address,
 			Amount:      t.Value,
-			FeeBps:      inv.FeeBps,
-			FeeFixed:    inv.FeeFixed,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue

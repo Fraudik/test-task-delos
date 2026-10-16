@@ -91,7 +91,12 @@ func (e *env) call(method, path, apiKey string, headers map[string]string, body 
 
 func (e *env) createInvoice(apiKey, idempotencyKey string) response {
 	e.t.Helper()
-	return e.call(http.MethodPost, "/v1/invoices", apiKey, map[string]string{"Idempotency-Key": idempotencyKey}, nil)
+	return e.createInvoiceFor(apiKey, idempotencyKey, "100")
+}
+
+func (e *env) createInvoiceFor(apiKey, idempotencyKey, amount string) response {
+	e.t.Helper()
+	return e.call(http.MethodPost, "/v1/invoices", apiKey, map[string]string{"Idempotency-Key": idempotencyKey}, map[string]string{"amount": amount})
 }
 
 func (e *env) invoice(apiKey string, id any) response {
@@ -186,8 +191,8 @@ func TestFullScenarioLowRisk(t *testing.T) {
 	e.assertBalance(acmeKey, "98.000000", "0.000000")
 	e.assertBalance(globexKey, "0.000000", "0.000000")
 
-	if n := e.scalar(`SELECT count(*) FROM deposits WHERE notified_at IS NOT NULL`); n != 1 {
-		t.Errorf("%d deposits notified, want 1", n)
+	if n := e.scalar(`SELECT count(*) FROM invoices WHERE notified_at IS NOT NULL`); n != 1 {
+		t.Errorf("%d invoices notified, want 1", n)
 	}
 	for range 3 {
 		e.tick()
@@ -206,7 +211,7 @@ func TestFullScenarioHighRiskRefund(t *testing.T) {
 	e.tick()
 	e.tick()
 
-	e.assertInvoice(globexKey, inv.body["id"], "refunded", "refunded")
+	e.assertInvoice(globexKey, inv.body["id"], "awaiting_payment", "refunded")
 	e.assertBalance(globexKey, "0.000000", "0.000000")
 	var status, to string
 	var amount int64
@@ -223,7 +228,7 @@ func TestFullScenarioHighRiskRefund(t *testing.T) {
 
 func TestAMLOutageKeepsFundsOnHold(t *testing.T) {
 	e := newEnv(t)
-	inv := e.createInvoice(acmeKey, "order-1")
+	inv := e.createInvoiceFor(acmeKey, "order-1", "10")
 	e.sim(http.MethodPut, "/sim/aml", map[string]bool{"available": false})
 	e.sim(http.MethodPost, "/sim/transfers", map[string]string{"from": payer, "to": inv.body["address"].(string), "amount": "10"})
 	e.sim(http.MethodPost, "/sim/blocks", map[string]int{"count": 4})
@@ -243,7 +248,7 @@ func TestAMLOutageKeepsFundsOnHold(t *testing.T) {
 
 func TestReorgBeforeConfirmationsLeavesNothing(t *testing.T) {
 	e := newEnv(t)
-	inv := e.createInvoice(acmeKey, "order-1")
+	inv := e.createInvoiceFor(acmeKey, "order-1", "10")
 	e.sim(http.MethodPost, "/sim/transfers", map[string]string{"from": payer, "to": inv.body["address"].(string), "amount": "10"})
 	e.sim(http.MethodPost, "/sim/blocks", map[string]int{"count": 2})
 	e.tick()
@@ -339,5 +344,49 @@ func TestDocsAreServed(t *testing.T) {
 		if res.StatusCode != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200", path, res.StatusCode)
 		}
+	}
+}
+
+func TestInvoicePaidByTwoTransfers(t *testing.T) {
+	e := newEnv(t)
+	inv := e.createInvoiceFor(acmeKey, "order-split", "100")
+	if inv.body["amount"] != "100.000000" || inv.body["received"] != "0.000000" {
+		t.Errorf("new invoice amount/received = %v/%v, want 100.000000/0.000000", inv.body["amount"], inv.body["received"])
+	}
+	id, address := inv.body["id"], inv.body["address"].(string)
+
+	e.sim(http.MethodPost, "/sim/transfers", map[string]string{"from": payer, "to": address, "amount": "60"})
+	e.sim(http.MethodPost, "/sim/blocks", map[string]int{"count": 4})
+	e.tick()
+	e.tick()
+	e.assertInvoice(acmeKey, id, "partially_paid", "confirmed")
+	if res := e.invoice(acmeKey, id); res.body["received"] != "60.000000" {
+		t.Errorf("received = %v, want 60.000000", res.body["received"])
+	}
+	e.assertBalance(acmeKey, "0.000000", "60.000000")
+
+	e.sim(http.MethodPost, "/sim/transfers", map[string]string{"from": payer, "to": address, "amount": "40"})
+	e.sim(http.MethodPost, "/sim/blocks", map[string]int{"count": 4})
+	e.tick()
+	e.tick()
+	e.assertInvoice(acmeKey, id, "paid", "credited", "credited")
+	e.assertBalance(acmeKey, "98.000000", "0.000000")
+	if n := e.scalar(`SELECT count(*) FROM invoices WHERE notified_at IS NOT NULL`); n != 1 {
+		t.Errorf("%d invoices notified, want 1", n)
+	}
+}
+
+func TestInvoiceAmountValidation(t *testing.T) {
+	e := newEnv(t)
+	for _, amount := range []string{"", "0", "-1", "1.0000001", "abc"} {
+		if res := e.createInvoiceFor(acmeKey, "bad-"+amount, amount); res.status != http.StatusBadRequest {
+			t.Errorf("amount %q = %d, want 400", amount, res.status)
+		}
+	}
+	if res := e.createInvoiceFor(acmeKey, "order-1", "10"); res.status != http.StatusCreated {
+		t.Fatalf("create = %d %v", res.status, res.body)
+	}
+	if res := e.createInvoiceFor(acmeKey, "order-1", "11"); res.status != http.StatusConflict {
+		t.Errorf("same key with another amount = %d, want 409", res.status)
 	}
 }

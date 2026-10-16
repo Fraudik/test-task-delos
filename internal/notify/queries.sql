@@ -1,24 +1,25 @@
 -- name: ClaimNotifications :many
-UPDATE deposits d
+UPDATE invoices i
 SET notify_next_attempt_at = now() + make_interval(secs => @lease_seconds::float8)
-WHERE d.id IN (
+WHERE i.id IN (
     SELECT c.id
-    FROM deposits c
-    WHERE c.status = 'credited' AND c.notified_at IS NULL AND c.notify_next_attempt_at <= now()
+    FROM invoices c
+    WHERE c.status = 'paid' AND c.notified_at IS NULL AND c.notify_next_attempt_at <= now()
     ORDER BY c.notify_next_attempt_at, c.id
     LIMIT @max_rows
     FOR UPDATE SKIP LOCKED
 )
-RETURNING d.id, d.invoice_id, d.partner_id, d.tx_hash, d.amount, d.notify_attempts;
+RETURNING i.id, i.partner_id, i.amount, i.notify_attempts,
+    (SELECT COALESCE(SUM(d.amount), 0)::bigint FROM deposits d WHERE d.invoice_id = i.id AND d.status = 'credited') AS credited;
 
 -- name: MarkNotified :exec
-UPDATE deposits
+UPDATE invoices
 SET notified_at = now()
 WHERE id = ANY (@ids::bigint[]) AND notified_at IS NULL;
 
 -- name: ScheduleNotifyRetries :exec
-UPDATE deposits d
-SET notify_attempts        = d.notify_attempts + 1,
+UPDATE invoices i
+SET notify_attempts        = i.notify_attempts + 1,
     notify_next_attempt_at = now() + make_interval(secs => r.delay_seconds)
 FROM (SELECT unnest(@ids::bigint[]) AS id, unnest(@delays_seconds::float8[]) AS delay_seconds) r
-WHERE d.id = r.id AND d.notified_at IS NULL;
+WHERE i.id = r.id AND i.notified_at IS NULL;

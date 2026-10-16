@@ -8,7 +8,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"test-task-dellos/internal/aml"
 	"test-task-dellos/internal/ledger"
 	"test-task-dellos/internal/money"
 	"test-task-dellos/internal/processing/deposit"
@@ -29,86 +28,182 @@ func New(db *pgxpool.Pool, cfg Config, log *slog.Logger) *Stage {
 	return &Stage{db: db, cfg: cfg, log: log.With("stage", "settlement")}
 }
 
+type paidInvoice struct {
+	invoice  settlementdb.ClaimPaidInvoicesRow
+	deposits []int64
+	received money.Amount
+	net, fee money.Amount
+}
+
+type outcome struct {
+	refunded []settlementdb.ClaimRefundableDepositsRow
+	paid     []paidInvoice
+	review   deposit.Review
+}
+
 func (s *Stage) Run(ctx context.Context) (int, error) {
 	var (
 		claimed int
-		done    finishBatch
-		review  deposit.Review
+		out     outcome
 	)
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		out = outcome{}
 		q := settlementdb.New(tx)
-		rows, err := q.ClaimSettleableDeposits(ctx, s.cfg.BatchSize)
+		refunds, err := q.ClaimRefundableDeposits(ctx, s.cfg.BatchSize)
 		if err != nil {
-			return fmt.Errorf("settlement: claim settleable deposits: %w", err)
+			return fmt.Errorf("settlement: claim refundable deposits: %w", err)
 		}
-		claimed = len(rows)
+		invoices, err := s.lockPaidInvoices(ctx, q)
+		if err != nil {
+			return err
+		}
+		claimed = len(refunds) + len(invoices)
 		if claimed == 0 {
 			return nil
 		}
 
-		var (
-			txns    []ledger.Transaction
-			planned []settlementdb.ClaimSettleableDepositsRow
-		)
-		for _, r := range rows {
-			t, err := settlementTxn(r)
-			if err != nil {
-				review.Add(r.ID, err)
+		txns := make([]ledger.Transaction, 0, claimed)
+		for _, r := range refunds {
+			txns = append(txns, ledger.Transaction{
+				Key:  deposit.LedgerKey(r.ID, "refund"),
+				Legs: []ledger.Leg{{Debit: ledger.PartnerHold(r.PartnerID), Credit: ledger.RefundPending, Amount: r.Amount}},
+			})
+		}
+		for _, p := range invoices {
+			txns = append(txns, settleTxn(p))
+		}
+		results, err := ledger.PostBatch(ctx, tx, txns...)
+		if err != nil {
+			return fmt.Errorf("settlement: post to ledger: %w", err)
+		}
+		for i, r := range refunds {
+			if err := results[i].Err; err != nil {
+				out.review.Add(r.ID, err)
 				continue
 			}
-			txns = append(txns, t)
-			planned = append(planned, r)
+			out.refunded = append(out.refunded, r)
 		}
-		if len(txns) > 0 {
-			results, err := ledger.PostBatch(ctx, tx, txns...)
-			if err != nil {
-				return fmt.Errorf("settlement: post settlements: %w", err)
-			}
-			for i, res := range results {
-				if res.Err != nil {
-					review.Add(planned[i].ID, res.Err)
-					continue
+		for i, p := range invoices {
+			if err := results[len(refunds)+i].Err; err != nil {
+				for _, id := range p.deposits {
+					out.review.Add(id, fmt.Errorf("invoice %d settlement: %w", p.invoice.ID, err))
 				}
-				done.add(planned[i])
+				continue
 			}
+			out.paid = append(out.paid, p)
 		}
-
-		if err := done.apply(ctx, q); err != nil {
-			return err
-		}
-		return review.Apply(ctx, tx)
+		return out.apply(ctx, tx, q)
 	})
 	if err != nil {
 		return 0, err
 	}
-	for i, id := range done.finish.Ids {
-		s.log.Info("deposit processed", "deposit_id", id, "status", done.finish.Statuses[i])
+	for _, r := range out.refunded {
+		s.log.Info("deposit refunded", "deposit_id", r.ID, "amount", r.Amount.String())
 	}
-	review.Log(s.log, "settlement")
+	for _, p := range out.paid {
+		s.log.Info("invoice paid, funds available", "invoice_id", p.invoice.ID, "deposits", p.deposits,
+			"received", p.received.String(), "net", p.net.String(), "fee", p.fee.String())
+	}
+	out.review.Log(s.log, "settlement")
 	return claimed, nil
 }
 
-func settlementTxn(d settlementdb.ClaimSettleableDepositsRow) (ledger.Transaction, error) {
-	hold := ledger.PartnerHold(d.PartnerID)
-	switch aml.Risk(d.AmlRisk) {
-	case aml.RiskLow:
-		net, fee := splitFee(d.Amount, d.FeeBps, d.FeeFixed)
-		var legs []ledger.Leg
-		if net > 0 {
-			legs = append(legs, ledger.Leg{Debit: hold, Credit: ledger.PartnerAvailable(d.PartnerID), Amount: net})
-		}
-		if fee > 0 {
-			legs = append(legs, ledger.Leg{Debit: hold, Credit: ledger.Fees, Amount: fee})
-		}
-		return ledger.Transaction{Key: deposit.LedgerKey(d.ID, "settle"), Legs: legs}, nil
-	case aml.RiskHigh:
-		return ledger.Transaction{
-			Key:  deposit.LedgerKey(d.ID, "refund"),
-			Legs: []ledger.Leg{{Debit: hold, Credit: ledger.RefundPending, Amount: d.Amount}},
-		}, nil
-	default:
-		return ledger.Transaction{}, fmt.Errorf("unknown AML risk %q", d.AmlRisk)
+func (s *Stage) lockPaidInvoices(ctx context.Context, q *settlementdb.Queries) ([]paidInvoice, error) {
+	invoices, err := q.ClaimPaidInvoices(ctx, s.cfg.BatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("settlement: claim paid invoices: %w", err)
 	}
+	if len(invoices) == 0 {
+		return nil, nil
+	}
+	ids := make([]int64, len(invoices))
+	for i, inv := range invoices {
+		ids[i] = inv.ID
+	}
+	rows, err := q.LockCleanDeposits(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("settlement: lock invoice deposits: %w", err)
+	}
+	byInvoice := make(map[int64]*paidInvoice, len(invoices))
+	paid := make([]paidInvoice, len(invoices))
+	for i, inv := range invoices {
+		paid[i] = paidInvoice{invoice: inv}
+		byInvoice[inv.ID] = &paid[i]
+	}
+	for _, d := range rows {
+		p := byInvoice[d.InvoiceID]
+		p.deposits = append(p.deposits, d.ID)
+		p.received += d.Amount
+	}
+	ready := paid[:0]
+	for _, p := range paid {
+		if p.received < p.invoice.Amount {
+			continue
+		}
+		p.net, p.fee = splitFee(p.received, p.invoice.FeeBps, p.invoice.FeeFixed)
+		ready = append(ready, p)
+	}
+	return ready, nil
+}
+
+func settleTxn(p paidInvoice) ledger.Transaction {
+	hold := ledger.PartnerHold(p.invoice.PartnerID)
+	var legs []ledger.Leg
+	if p.net > 0 {
+		legs = append(legs, ledger.Leg{Debit: hold, Credit: ledger.PartnerAvailable(p.invoice.PartnerID), Amount: p.net})
+	}
+	if p.fee > 0 {
+		legs = append(legs, ledger.Leg{Debit: hold, Credit: ledger.Fees, Amount: p.fee})
+	}
+	return ledger.Transaction{Key: deposit.InvoiceLedgerKey(p.invoice.ID, "settle"), Legs: legs}
+}
+
+func (o *outcome) apply(ctx context.Context, tx pgx.Tx, q *settlementdb.Queries) error {
+	if len(o.refunded) > 0 {
+		ids := make([]int64, len(o.refunded))
+		refunds := settlementdb.InsertRefundsParams{}
+		for i, r := range o.refunded {
+			ids[i] = r.ID
+			refunds.DepositIds = append(refunds.DepositIds, r.ID)
+			refunds.ToAddresses = append(refunds.ToAddresses, r.FromAddress)
+			refunds.Amounts = append(refunds.Amounts, int64(r.Amount))
+		}
+		if err := finish(ctx, q, settlementdb.DepositStatusRefunded, ids); err != nil {
+			return err
+		}
+		if err := q.InsertRefunds(ctx, refunds); err != nil {
+			return fmt.Errorf("settlement: create refunds: %w", err)
+		}
+	}
+	if len(o.paid) > 0 {
+		var depositIDs, invoiceIDs []int64
+		for _, p := range o.paid {
+			depositIDs = append(depositIDs, p.deposits...)
+			invoiceIDs = append(invoiceIDs, p.invoice.ID)
+		}
+		if err := finish(ctx, q, settlementdb.DepositStatusCredited, depositIDs); err != nil {
+			return err
+		}
+		n, err := q.MarkInvoicesPaid(ctx, invoiceIDs)
+		if err != nil {
+			return fmt.Errorf("settlement: mark invoices paid: %w", err)
+		}
+		if int(n) != len(invoiceIDs) {
+			return fmt.Errorf("settlement: marked %d of %d invoices paid", n, len(invoiceIDs))
+		}
+	}
+	return o.review.Apply(ctx, tx)
+}
+
+func finish(ctx context.Context, q *settlementdb.Queries, status settlementdb.DepositStatus, ids []int64) error {
+	n, err := q.FinishDeposits(ctx, settlementdb.FinishDepositsParams{Status: status, Ids: ids})
+	if err != nil {
+		return fmt.Errorf("settlement: mark deposits %s: %w", status, err)
+	}
+	if int(n) != len(ids) {
+		return fmt.Errorf("settlement: marked %d of %d deposits %s", n, len(ids), status)
+	}
+	return nil
 }
 
 func splitFee(amount money.Amount, feeBps int32, feeFixed money.Amount) (net, fee money.Amount) {
@@ -120,40 +215,4 @@ func splitFee(amount money.Amount, feeBps int32, feeFixed money.Amount) (net, fe
 	}
 	fee += feeFixed
 	return amount - fee, fee
-}
-
-type finishBatch struct {
-	finish  settlementdb.FinishDepositsParams
-	refunds settlementdb.InsertRefundsParams
-}
-
-func (b *finishBatch) add(d settlementdb.ClaimSettleableDepositsRow) {
-	status := settlementdb.DepositStatusCredited
-	if aml.Risk(d.AmlRisk) == aml.RiskHigh {
-		status = settlementdb.DepositStatusRefunded
-		b.refunds.DepositIds = append(b.refunds.DepositIds, d.ID)
-		b.refunds.ToAddresses = append(b.refunds.ToAddresses, d.FromAddress)
-		b.refunds.Amounts = append(b.refunds.Amounts, int64(d.Amount))
-	}
-	b.finish.Ids = append(b.finish.Ids, d.ID)
-	b.finish.Statuses = append(b.finish.Statuses, string(status))
-}
-
-func (b *finishBatch) apply(ctx context.Context, q *settlementdb.Queries) error {
-	if len(b.finish.Ids) == 0 {
-		return nil
-	}
-	n, err := q.FinishDeposits(ctx, b.finish)
-	if err != nil {
-		return fmt.Errorf("settlement: finish deposits: %w", err)
-	}
-	if int(n) != len(b.finish.Ids) {
-		return fmt.Errorf("settlement: finished %d of %d deposits", n, len(b.finish.Ids))
-	}
-	if len(b.refunds.DepositIds) > 0 {
-		if err := q.InsertRefunds(ctx, b.refunds); err != nil {
-			return fmt.Errorf("settlement: create refunds: %w", err)
-		}
-	}
-	return nil
 }

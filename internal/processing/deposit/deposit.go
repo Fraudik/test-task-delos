@@ -42,3 +42,7 @@ func (r *Review) Log(log *slog.Logger, stage string) {
 		log.Error("deposit needs manual review", "stage", stage, "deposit_id", id, "reason", r.params.Reasons[i])
 	}
 }
+
+func InvoiceLedgerKey(invoiceID int64, step string) string {
+	return fmt.Sprintf("invoice:%d:%s", invoiceID, step)
+}

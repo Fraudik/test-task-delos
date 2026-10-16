@@ -13,33 +13,49 @@ import (
 )
 
 const createInvoice = `-- name: CreateInvoice :one
-INSERT INTO invoices (partner_id, address, idempotency_key)
-VALUES ($1, $2, $3::text)
+INSERT INTO invoices (partner_id, address, idempotency_key, amount, fee_bps, fee_fixed)
+SELECT p.id, $1, $2::text, $3, p.fee_bps, p.fee_fixed
+FROM partners p
+WHERE p.id = $4
 ON CONFLICT (partner_id, idempotency_key) DO NOTHING
-RETURNING id, address, created_at
+RETURNING id, address, amount, status, created_at
 `
 
 type CreateInvoiceParams struct {
-	PartnerID      int64
 	Address        string
 	IdempotencyKey string
+	Amount         money.Amount
+	PartnerID      int64
 }
 
 type CreateInvoiceRow struct {
 	ID        int64
 	Address   string
+	Amount    money.Amount
+	Status    InvoiceStatus
 	CreatedAt pgtype.Timestamptz
 }
 
 func (q *Queries) CreateInvoice(ctx context.Context, arg CreateInvoiceParams) (CreateInvoiceRow, error) {
-	row := q.db.QueryRow(ctx, createInvoice, arg.PartnerID, arg.Address, arg.IdempotencyKey)
+	row := q.db.QueryRow(ctx, createInvoice,
+		arg.Address,
+		arg.IdempotencyKey,
+		arg.Amount,
+		arg.PartnerID,
+	)
 	var i CreateInvoiceRow
-	err := row.Scan(&i.ID, &i.Address, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.Address,
+		&i.Amount,
+		&i.Status,
+		&i.CreatedAt,
+	)
 	return i, err
 }
 
 const getInvoice = `-- name: GetInvoice :one
-SELECT id, address, created_at
+SELECT id, address, amount, status, created_at
 FROM invoices
 WHERE id = $1 AND partner_id = $2
 `
@@ -52,18 +68,26 @@ type GetInvoiceParams struct {
 type GetInvoiceRow struct {
 	ID        int64
 	Address   string
+	Amount    money.Amount
+	Status    InvoiceStatus
 	CreatedAt pgtype.Timestamptz
 }
 
 func (q *Queries) GetInvoice(ctx context.Context, arg GetInvoiceParams) (GetInvoiceRow, error) {
 	row := q.db.QueryRow(ctx, getInvoice, arg.ID, arg.PartnerID)
 	var i GetInvoiceRow
-	err := row.Scan(&i.ID, &i.Address, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.Address,
+		&i.Amount,
+		&i.Status,
+		&i.CreatedAt,
+	)
 	return i, err
 }
 
 const invoiceByIdempotencyKey = `-- name: InvoiceByIdempotencyKey :one
-SELECT id, address, created_at
+SELECT id, address, amount, status, created_at
 FROM invoices
 WHERE partner_id = $1 AND idempotency_key = $2::text
 `
@@ -76,21 +100,31 @@ type InvoiceByIdempotencyKeyParams struct {
 type InvoiceByIdempotencyKeyRow struct {
 	ID        int64
 	Address   string
+	Amount    money.Amount
+	Status    InvoiceStatus
 	CreatedAt pgtype.Timestamptz
 }
 
 func (q *Queries) InvoiceByIdempotencyKey(ctx context.Context, arg InvoiceByIdempotencyKeyParams) (InvoiceByIdempotencyKeyRow, error) {
 	row := q.db.QueryRow(ctx, invoiceByIdempotencyKey, arg.PartnerID, arg.IdempotencyKey)
 	var i InvoiceByIdempotencyKeyRow
-	err := row.Scan(&i.ID, &i.Address, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.Address,
+		&i.Amount,
+		&i.Status,
+		&i.CreatedAt,
+	)
 	return i, err
 }
 
 const invoiceDeposits = `-- name: InvoiceDeposits :many
-SELECT id, tx_hash, log_index, block_number, block_hash, amount, status, created_at
-FROM deposits
-WHERE invoice_id = $1
-ORDER BY id
+SELECT d.id, d.tx_hash, d.log_index, d.block_number, d.block_hash, d.amount, d.status, d.created_at,
+    COALESCE(a.risk, '')::text AS aml_risk
+FROM deposits d
+LEFT JOIN deposit_aml_checks a ON a.deposit_id = d.id
+WHERE d.invoice_id = $1
+ORDER BY d.id
 `
 
 type InvoiceDepositsRow struct {
@@ -102,6 +136,7 @@ type InvoiceDepositsRow struct {
 	Amount      money.Amount
 	Status      DepositStatus
 	CreatedAt   pgtype.Timestamptz
+	AmlRisk     string
 }
 
 func (q *Queries) InvoiceDeposits(ctx context.Context, invoiceID int64) ([]InvoiceDepositsRow, error) {
@@ -122,6 +157,7 @@ func (q *Queries) InvoiceDeposits(ctx context.Context, invoiceID int64) ([]Invoi
 			&i.Amount,
 			&i.Status,
 			&i.CreatedAt,
+			&i.AmlRisk,
 		); err != nil {
 			return nil, err
 		}

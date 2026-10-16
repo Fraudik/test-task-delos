@@ -11,43 +11,87 @@ import (
 	"test-task-dellos/internal/money"
 )
 
-const claimSettleableDeposits = `-- name: ClaimSettleableDeposits :many
-SELECT d.id, d.partner_id, d.from_address, d.amount, d.fee_bps, d.fee_fixed, a.risk AS aml_risk
+const claimPaidInvoices = `-- name: ClaimPaidInvoices :many
+SELECT i.id, i.partner_id, i.amount, i.fee_bps, i.fee_fixed
+FROM invoices i
+WHERE i.status = 'open'
+  AND i.id IN (SELECT DISTINCT d.invoice_id FROM deposits d WHERE d.status = 'confirmed')
+  AND i.amount <= (
+    SELECT COALESCE(SUM(d.amount), 0)::bigint
+    FROM deposits d
+    JOIN deposit_aml_checks a ON a.deposit_id = d.id
+    WHERE d.invoice_id = i.id AND d.status = 'confirmed' AND a.risk = 'low'
+  )
+ORDER BY i.id
+LIMIT $1
+FOR UPDATE OF i SKIP LOCKED
+`
+
+type ClaimPaidInvoicesRow struct {
+	ID        int64
+	PartnerID int64
+	Amount    money.Amount
+	FeeBps    int32
+	FeeFixed  money.Amount
+}
+
+func (q *Queries) ClaimPaidInvoices(ctx context.Context, maxRows int32) ([]ClaimPaidInvoicesRow, error) {
+	rows, err := q.db.Query(ctx, claimPaidInvoices, maxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimPaidInvoicesRow
+	for rows.Next() {
+		var i ClaimPaidInvoicesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.Amount,
+			&i.FeeBps,
+			&i.FeeFixed,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const claimRefundableDeposits = `-- name: ClaimRefundableDeposits :many
+SELECT d.id, d.partner_id, d.from_address, d.amount
 FROM deposits d
 JOIN deposit_aml_checks a ON a.deposit_id = d.id
-WHERE d.status = 'confirmed' AND a.risk <> ''
+WHERE d.status = 'confirmed' AND a.risk = 'high'
 ORDER BY d.id
 LIMIT $1
 FOR UPDATE OF d SKIP LOCKED
 `
 
-type ClaimSettleableDepositsRow struct {
+type ClaimRefundableDepositsRow struct {
 	ID          int64
 	PartnerID   int64
 	FromAddress string
 	Amount      money.Amount
-	FeeBps      int32
-	FeeFixed    money.Amount
-	AmlRisk     string
 }
 
-func (q *Queries) ClaimSettleableDeposits(ctx context.Context, maxRows int32) ([]ClaimSettleableDepositsRow, error) {
-	rows, err := q.db.Query(ctx, claimSettleableDeposits, maxRows)
+func (q *Queries) ClaimRefundableDeposits(ctx context.Context, maxRows int32) ([]ClaimRefundableDepositsRow, error) {
+	rows, err := q.db.Query(ctx, claimRefundableDeposits, maxRows)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ClaimSettleableDepositsRow
+	var items []ClaimRefundableDepositsRow
 	for rows.Next() {
-		var i ClaimSettleableDepositsRow
+		var i ClaimRefundableDepositsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.PartnerID,
 			&i.FromAddress,
 			&i.Amount,
-			&i.FeeBps,
-			&i.FeeFixed,
-			&i.AmlRisk,
 		); err != nil {
 			return nil, err
 		}
@@ -60,19 +104,18 @@ func (q *Queries) ClaimSettleableDeposits(ctx context.Context, maxRows int32) ([
 }
 
 const finishDeposits = `-- name: FinishDeposits :execrows
-UPDATE deposits d
-SET status = f.status::deposit_status, updated_at = now()
-FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS status) f
-WHERE d.id = f.id AND d.status = 'confirmed'
+UPDATE deposits
+SET status = $1, updated_at = now()
+WHERE id = ANY ($2::bigint[]) AND status = 'confirmed'
 `
 
 type FinishDepositsParams struct {
-	Ids      []int64
-	Statuses []string
+	Status DepositStatus
+	Ids    []int64
 }
 
 func (q *Queries) FinishDeposits(ctx context.Context, arg FinishDepositsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, finishDeposits, arg.Ids, arg.Statuses)
+	result, err := q.db.Exec(ctx, finishDeposits, arg.Status, arg.Ids)
 	if err != nil {
 		return 0, err
 	}
@@ -99,4 +142,53 @@ type InsertRefundsParams struct {
 func (q *Queries) InsertRefunds(ctx context.Context, arg InsertRefundsParams) error {
 	_, err := q.db.Exec(ctx, insertRefunds, arg.DepositIds, arg.ToAddresses, arg.Amounts)
 	return err
+}
+
+const lockCleanDeposits = `-- name: LockCleanDeposits :many
+SELECT d.id, d.invoice_id, d.amount
+FROM deposits d
+JOIN deposit_aml_checks a ON a.deposit_id = d.id
+WHERE d.invoice_id = ANY ($1::bigint[]) AND d.status = 'confirmed' AND a.risk = 'low'
+ORDER BY d.id
+FOR UPDATE OF d
+`
+
+type LockCleanDepositsRow struct {
+	ID        int64
+	InvoiceID int64
+	Amount    money.Amount
+}
+
+func (q *Queries) LockCleanDeposits(ctx context.Context, invoiceIds []int64) ([]LockCleanDepositsRow, error) {
+	rows, err := q.db.Query(ctx, lockCleanDeposits, invoiceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockCleanDepositsRow
+	for rows.Next() {
+		var i LockCleanDepositsRow
+		if err := rows.Scan(&i.ID, &i.InvoiceID, &i.Amount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markInvoicesPaid = `-- name: MarkInvoicesPaid :execrows
+UPDATE invoices
+SET status = 'paid', paid_at = now()
+WHERE id = ANY ($1::bigint[]) AND status = 'open'
+`
+
+func (q *Queries) MarkInvoicesPaid(ctx context.Context, ids []int64) (int64, error) {
+	result, err := q.db.Exec(ctx, markInvoicesPaid, ids)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

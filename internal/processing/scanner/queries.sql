@@ -14,19 +14,18 @@ SET next_block = @next_block, last_hash = @last_hash, updated_at = now()
 WHERE name = @name;
 
 -- name: InvoicesByAddresses :many
-SELECT i.id, i.partner_id, i.address, p.fee_bps, p.fee_fixed
+SELECT i.id, i.partner_id, i.address
 FROM invoices i
-JOIN partners p ON p.id = i.partner_id
 WHERE i.address = ANY (@addresses::text[]);
 
 -- name: UpsertDeposit :one
 INSERT INTO deposits (
     invoice_id, partner_id, tx_hash, log_index, block_number, block_hash,
-    from_address, to_address, amount, fee_bps, fee_fixed
+    from_address, to_address, amount
 )
 VALUES (
     @invoice_id, @partner_id, @tx_hash, @log_index, @block_number, @block_hash,
-    @from_address, @to_address, @amount, @fee_bps, @fee_fixed
+    @from_address, @to_address, @amount
 )
 ON CONFLICT (tx_hash, log_index) DO UPDATE
 SET block_number = EXCLUDED.block_number,

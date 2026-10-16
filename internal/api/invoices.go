@@ -13,13 +13,20 @@ import (
 
 	"test-task-dellos/internal/api/apidb"
 	"test-task-dellos/internal/ledger"
+	"test-task-dellos/internal/money"
 )
 
 const IdempotencyKeyHeader = "Idempotency-Key"
 
+type createInvoiceRequest struct {
+	Amount string `json:"amount"`
+}
+
 type invoiceResponse struct {
 	ID        int64             `json:"id"`
 	Address   string            `json:"address"`
+	Amount    string            `json:"amount"`
+	Received  string            `json:"received"`
 	Status    string            `json:"status"`
 	CreatedAt time.Time         `json:"created_at"`
 	Deposits  []depositResponse `json:"deposits"`
@@ -41,32 +48,59 @@ type balanceResponse struct {
 	OnHold    string `json:"on_hold"`
 }
 
+type invoiceRow struct {
+	ID        int64
+	Address   string
+	Amount    money.Amount
+	Status    apidb.InvoiceStatus
+	CreatedAt pgtype.Timestamptz
+}
+
 func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get(IdempotencyKeyHeader)
 	if key == "" || len(key) > 255 {
 		writeError(w, http.StatusBadRequest, IdempotencyKeyHeader+" header is required (1..255 characters)")
 		return
 	}
+	var req createInvoiceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "body must be {\"amount\": \"<USDT>\"}: "+err.Error())
+		return
+	}
+	amount, err := money.Parse(req.Amount)
+	if err != nil || amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be a positive USDT amount with up to 6 decimals")
+		return
+	}
+
 	p := partnerFrom(r.Context())
 	q := apidb.New(s.db)
-
-	row, err := q.CreateInvoice(r.Context(), apidb.CreateInvoiceParams{PartnerID: p.ID, Address: newAddress(), IdempotencyKey: key})
-	status := http.StatusCreated
-	if errors.Is(err, pgx.ErrNoRows) {
-		existing, err := q.InvoiceByIdempotencyKey(r.Context(), apidb.InvoiceByIdempotencyKeyParams{PartnerID: p.ID, IdempotencyKey: key})
-		if err != nil {
-			s.internalError(w, "load idempotent invoice", err)
-			return
-		}
-		row = apidb.CreateInvoiceRow(existing)
-		status = http.StatusOK
-	} else if err != nil {
+	created, err := q.CreateInvoice(r.Context(), apidb.CreateInvoiceParams{
+		PartnerID:      p.ID,
+		Address:        newAddress(),
+		IdempotencyKey: key,
+		Amount:         amount,
+	})
+	if err == nil {
+		s.log.Info("invoice created", "partner_id", p.ID, "invoice_id", created.ID, "address", created.Address, "amount", created.Amount.String())
+		s.writeInvoice(w, r, http.StatusCreated, invoiceRow(created))
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		s.internalError(w, "create invoice", err)
 		return
-	} else {
-		s.log.Info("invoice created", "partner_id", p.ID, "invoice_id", row.ID, "address", row.Address)
 	}
-	s.writeInvoice(w, r, status, row.ID, row.Address, row.CreatedAt)
+
+	existing, err := q.InvoiceByIdempotencyKey(r.Context(), apidb.InvoiceByIdempotencyKeyParams{PartnerID: p.ID, IdempotencyKey: key})
+	if err != nil {
+		s.internalError(w, "load idempotent invoice", err)
+		return
+	}
+	if existing.Amount != amount {
+		writeError(w, http.StatusConflict, IdempotencyKeyHeader+" was already used for an invoice of "+existing.Amount.String()+" USDT")
+		return
+	}
+	s.writeInvoice(w, r, http.StatusOK, invoiceRow(existing))
 }
 
 func (s *Server) getInvoice(w http.ResponseWriter, r *http.Request) {
@@ -84,19 +118,27 @@ func (s *Server) getInvoice(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "get invoice", err)
 		return
 	}
-	s.writeInvoice(w, r, http.StatusOK, row.ID, row.Address, row.CreatedAt)
+	s.writeInvoice(w, r, http.StatusOK, invoiceRow(row))
 }
 
-func (s *Server) writeInvoice(w http.ResponseWriter, r *http.Request, status int, id int64, address string, createdAt pgtype.Timestamptz) {
-	rows, err := apidb.New(s.db).InvoiceDeposits(r.Context(), id)
+func (s *Server) writeInvoice(w http.ResponseWriter, r *http.Request, status int, inv invoiceRow) {
+	rows, err := apidb.New(s.db).InvoiceDeposits(r.Context(), inv.ID)
 	if err != nil {
 		s.internalError(w, "load invoice deposits", err)
 		return
 	}
-	resp := invoiceResponse{ID: id, Address: address, CreatedAt: createdAt.Time.UTC(), Deposits: []depositResponse{}}
-	statuses := make([]apidb.DepositStatus, len(rows))
-	for i, d := range rows {
-		statuses[i] = d.Status
+	resp := invoiceResponse{
+		ID:        inv.ID,
+		Address:   inv.Address,
+		Amount:    inv.Amount.String(),
+		CreatedAt: inv.CreatedAt.Time.UTC(),
+		Deposits:  []depositResponse{},
+	}
+	received := money.Amount(0)
+	for _, d := range rows {
+		if countsTowardInvoice(d) {
+			received += d.Amount
+		}
 		resp.Deposits = append(resp.Deposits, depositResponse{
 			TxHash:      d.TxHash,
 			LogIndex:    d.LogIndex,
@@ -107,24 +149,33 @@ func (s *Server) writeInvoice(w http.ResponseWriter, r *http.Request, status int
 			DetectedAt:  d.CreatedAt.Time.UTC(),
 		})
 	}
-	resp.Status = invoiceStatus(statuses)
+	resp.Received = received.String()
+	resp.Status = invoiceStatus(inv, rows, received)
 	writeJSON(w, status, resp)
 }
 
-func invoiceStatus(deposits []apidb.DepositStatus) string {
-	seen := make(map[apidb.DepositStatus]bool, len(deposits))
+func countsTowardInvoice(d apidb.InvoiceDepositsRow) bool {
+	return d.Status == apidb.DepositStatusCredited || (d.Status == apidb.DepositStatusConfirmed && d.AmlRisk == "low")
+}
+
+func invoiceStatus(inv invoiceRow, deposits []apidb.InvoiceDepositsRow, received money.Amount) string {
+	if inv.Status == apidb.InvoiceStatusPaid {
+		return "paid"
+	}
+	inFlight := false
 	for _, d := range deposits {
-		seen[d] = true
+		switch {
+		case d.Status == apidb.DepositStatusNeedsReview:
+			return "needs_review"
+		case d.Status == apidb.DepositStatusPending, d.Status == apidb.DepositStatusConfirmed && d.AmlRisk == "":
+			inFlight = true
+		}
 	}
 	switch {
-	case seen[apidb.DepositStatusNeedsReview]:
-		return "needs_review"
-	case seen[apidb.DepositStatusPending] || seen[apidb.DepositStatusConfirmed]:
+	case inFlight || received >= inv.Amount:
 		return "processing"
-	case seen[apidb.DepositStatusCredited]:
-		return "paid"
-	case seen[apidb.DepositStatusRefunded]:
-		return "refunded"
+	case received > 0:
+		return "partially_paid"
 	default:
 		return "awaiting_payment"
 	}

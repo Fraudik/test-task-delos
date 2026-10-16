@@ -17,11 +17,21 @@ paths:
           name: Idempotency-Key
           required: true
           schema: {type: string, minLength: 1, maxLength: 255}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: {type: string, example: "100.5", description: Invoice amount in USDT, up to 6 decimals}
       responses:
         "201": {description: Invoice created, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
         "200": {description: Invoice already created with this key, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
         "400": {$ref: "#/components/responses/Error"}
         "401": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
   /v1/invoices/{id}:
     get:
       tags: [partner]
@@ -180,9 +190,14 @@ components:
       properties:
         id: {type: integer, format: int64}
         address: {type: string}
+        amount: {type: string, example: "100.000000"}
+        received:
+          type: string
+          example: "60.000000"
+          description: Confirmed transfers with a clean AML verdict counted toward the invoice
         status:
           type: string
-          enum: [awaiting_payment, processing, paid, refunded, needs_review]
+          enum: [awaiting_payment, processing, partially_paid, paid, needs_review]
         created_at: {type: string, format: date-time}
         deposits:
           type: array

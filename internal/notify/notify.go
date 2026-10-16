@@ -13,11 +13,10 @@ import (
 )
 
 type Notification struct {
-	DepositID int64
 	InvoiceID int64
 	PartnerID int64
-	TxHash    string
 	Amount    money.Amount
+	Received  money.Amount
 }
 
 type PartnerNotifier interface {
@@ -29,7 +28,7 @@ type LogNotifier struct {
 }
 
 func (l LogNotifier) NotifyPartner(ctx context.Context, n Notification) error {
-	l.Log.Info("NotifyPartner", "deposit_id", n.DepositID, "invoice_id", n.InvoiceID, "partner_id", n.PartnerID, "tx", n.TxHash, "amount", n.Amount.String())
+	l.Log.Info("NotifyPartner", "invoice_id", n.InvoiceID, "partner_id", n.PartnerID, "amount", n.Amount.String(), "received", n.Received.String())
 	return nil
 }
 
@@ -101,12 +100,12 @@ func (n *Notifier) Tick(ctx context.Context) (int, error) {
 	for _, c := range claimed {
 		callCtx, cancel := context.WithTimeout(ctx, n.cfg.CallTimeout)
 		err := n.notifier.NotifyPartner(callCtx, Notification{
-			DepositID: c.ID, InvoiceID: c.InvoiceID, PartnerID: c.PartnerID, TxHash: c.TxHash, Amount: c.Amount,
+			InvoiceID: c.ID, PartnerID: c.PartnerID, Amount: c.Amount, Received: money.Amount(c.Credited),
 		})
 		cancel()
 		if err != nil {
 			delay := backoff(n.cfg, c.NotifyAttempts)
-			n.log.Warn("NotifyPartner failed, will retry", "deposit_id", c.ID, "attempt", c.NotifyAttempts+1, "retry_in", delay, "err", err)
+			n.log.Warn("NotifyPartner failed, will retry", "invoice_id", c.ID, "attempt", c.NotifyAttempts+1, "retry_in", delay, "err", err)
 			retries.Ids = append(retries.Ids, c.ID)
 			retries.DelaysSeconds = append(retries.DelaysSeconds, delay.Seconds())
 			continue

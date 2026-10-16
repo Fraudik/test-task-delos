@@ -14,7 +14,9 @@ overrides:
         go_type: *amount
       - column: partners.fee_fixed
         go_type: *amount
-      - column: deposits.fee_fixed
+      - column: invoices.amount
+        go_type: *amount
+      - column: invoices.fee_fixed
         go_type: *amount
 sql:
   - engine: postgresql

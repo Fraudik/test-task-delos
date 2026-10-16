@@ -113,10 +113,18 @@ func (e *env) partnerWithFee(feeBps int, feeFixed money.Amount) int64 {
 
 func (e *env) invoice(partnerID int64) string {
 	e.t.Helper()
+	return e.invoiceFor(partnerID, 1)
+}
+
+func (e *env) invoiceFor(partnerID int64, amount money.Amount) string {
+	e.t.Helper()
 	b := make([]byte, 20)
 	rand.Read(b)
 	address := "0x" + hex.EncodeToString(b)
-	if _, err := e.db.Exec(e.t.Context(), `INSERT INTO invoices (partner_id, address) VALUES ($1, $2)`, partnerID, address); err != nil {
+	_, err := e.db.Exec(e.t.Context(), `
+		INSERT INTO invoices (partner_id, address, amount, fee_bps, fee_fixed)
+		SELECT id, $2, $3, fee_bps, fee_fixed FROM partners WHERE id = $1`, partnerID, address, int64(amount))
+	if err != nil {
 		e.t.Fatalf("create invoice: %v", err)
 	}
 	return address
@@ -182,7 +190,7 @@ func (e *env) assertRisk(tr chain.Transfer, want string) {
 	}
 }
 
-const resetForReprocessing = `WITH d AS (UPDATE deposits SET status = 'confirmed' RETURNING id) UPDATE deposit_aml_checks a SET risk = '', reason = '', checked_at = NULL, next_attempt_at = now() FROM d WHERE a.deposit_id = d.id`
+const resetForReprocessing = `WITH d AS (UPDATE deposits SET status = 'confirmed' RETURNING id, invoice_id), i AS (UPDATE invoices SET status = 'open', paid_at = NULL WHERE id IN (SELECT invoice_id FROM d)) UPDATE deposit_aml_checks a SET risk = '', reason = '', checked_at = NULL, next_attempt_at = now() FROM d WHERE a.deposit_id = d.id`
 
 func (e *env) assertBalances(want map[ledger.Account]money.Amount) {
 	e.t.Helper()
@@ -844,12 +852,12 @@ func TestFixedPlusPercentFee(t *testing.T) {
 		t.Fatal(err)
 	}
 	var bps, fixed int64
-	err := e.db.QueryRow(t.Context(), `SELECT fee_bps, fee_fixed FROM deposits WHERE tx_hash = $1`, big.TxHash).Scan(&bps, &fixed)
+	err := e.db.QueryRow(t.Context(), `SELECT i.fee_bps, i.fee_fixed FROM invoices i JOIN deposits d ON d.invoice_id = i.id WHERE d.tx_hash = $1`, big.TxHash).Scan(&bps, &fixed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bps != 100 || fixed != 500_000 {
-		t.Errorf("deposit fee snapshot = %d bps + %d, want 100 bps + 500000", bps, fixed)
+		t.Errorf("invoice fee snapshot = %d bps + %d, want 100 bps + 500000", bps, fixed)
 	}
 }
 
@@ -895,4 +903,99 @@ func TestReincludedTransferIsCreditedOnce(t *testing.T) {
 		t.Errorf("%d ledger transactions, want 2", n)
 	}
 	e.assertBalances(map[ledger.Account]money.Amount{ledger.PartnerAvailable(pid): 5 * money.OneUSDT, ledger.PartnerHold(pid): 0})
+}
+
+func (e *env) invoiceStatus(address string) string {
+	e.t.Helper()
+	var s string
+	if err := e.db.QueryRow(e.t.Context(), `SELECT status::text FROM invoices WHERE address = $1`, address).Scan(&s); err != nil {
+		e.t.Fatalf("invoice status: %v", err)
+	}
+	return s
+}
+
+func TestInvoiceIsCreditedOnlyWhenFullyPaid(t *testing.T) {
+	e := newEnv(t)
+	pid := e.partnerWithFee(100, 500_000)
+	address := e.invoiceFor(pid, 100*money.OneUSDT)
+	hold, available := ledger.PartnerHold(pid), ledger.PartnerAvailable(pid)
+
+	first := e.send(payer, address, 60*money.OneUSDT)
+	e.sim.AddBlocks(4)
+	e.tick()
+	e.tick()
+	e.assertStatus(first, "confirmed")
+	if s := e.invoiceStatus(address); s != "open" {
+		t.Errorf("invoice status = %s after partial payment, want open", s)
+	}
+	e.assertBalances(map[ledger.Account]money.Amount{hold: 60 * money.OneUSDT, available: 0})
+
+	second := e.send(payer, address, 40*money.OneUSDT)
+	e.sim.AddBlocks(3)
+	e.tick()
+	e.assertStatus(second, "pending")
+	e.assertBalances(map[ledger.Account]money.Amount{hold: 60 * money.OneUSDT, available: 0})
+
+	e.sim.AddBlocks(1)
+	e.tick()
+	e.tick()
+	e.assertStatus(first, "credited")
+	e.assertStatus(second, "credited")
+	if s := e.invoiceStatus(address); s != "paid" {
+		t.Errorf("invoice status = %s, want paid", s)
+	}
+	e.assertBalances(map[ledger.Account]money.Amount{hold: 0, available: 98_500_000, ledger.Fees: 1_500_000})
+	if n := e.count(`SELECT count(*) FROM ledger_transactions`); n != 3 {
+		t.Errorf("%d ledger transactions, want 2 holds and 1 invoice settlement", n)
+	}
+}
+
+func TestHighRiskTransferDoesNotPayInvoice(t *testing.T) {
+	e := newEnv(t)
+	pid := e.partner(0)
+	address := e.invoiceFor(pid, 50*money.OneUSDT)
+
+	dirty := e.send(blacklisted, address, 50*money.OneUSDT)
+	e.sim.AddBlocks(4)
+	e.tick()
+	e.tick()
+	e.assertStatus(dirty, "refunded")
+	if s := e.invoiceStatus(address); s != "open" {
+		t.Errorf("invoice status = %s after refunded payment, want open", s)
+	}
+
+	clean := e.send(payer, address, 50*money.OneUSDT)
+	e.sim.AddBlocks(4)
+	e.tick()
+	e.tick()
+	e.assertStatus(clean, "credited")
+	if s := e.invoiceStatus(address); s != "paid" {
+		t.Errorf("invoice status = %s, want paid", s)
+	}
+	e.assertBalances(map[ledger.Account]money.Amount{
+		ledger.PartnerAvailable(pid): 50 * money.OneUSDT,
+		ledger.PartnerHold(pid):      0,
+		ledger.RefundPending:         50 * money.OneUSDT,
+	})
+}
+
+func TestTransferAfterInvoicePaidStaysOnHold(t *testing.T) {
+	e := newEnv(t)
+	pid := e.partner(0)
+	address := e.invoiceFor(pid, 10*money.OneUSDT)
+
+	e.send(payer, address, 10*money.OneUSDT)
+	e.sim.AddBlocks(4)
+	e.tick()
+	e.tick()
+	late := e.send(payer, address, 5*money.OneUSDT)
+	e.sim.AddBlocks(4)
+	e.tick()
+	e.tick()
+
+	e.assertStatus(late, "confirmed")
+	e.assertBalances(map[ledger.Account]money.Amount{
+		ledger.PartnerAvailable(pid): 10 * money.OneUSDT,
+		ledger.PartnerHold(pid):      5 * money.OneUSDT,
+	})
 }

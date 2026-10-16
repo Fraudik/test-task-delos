@@ -12,17 +12,18 @@ import (
 )
 
 const claimNotifications = `-- name: ClaimNotifications :many
-UPDATE deposits d
+UPDATE invoices i
 SET notify_next_attempt_at = now() + make_interval(secs => $1::float8)
-WHERE d.id IN (
+WHERE i.id IN (
     SELECT c.id
-    FROM deposits c
-    WHERE c.status = 'credited' AND c.notified_at IS NULL AND c.notify_next_attempt_at <= now()
+    FROM invoices c
+    WHERE c.status = 'paid' AND c.notified_at IS NULL AND c.notify_next_attempt_at <= now()
     ORDER BY c.notify_next_attempt_at, c.id
     LIMIT $2
     FOR UPDATE SKIP LOCKED
 )
-RETURNING d.id, d.invoice_id, d.partner_id, d.tx_hash, d.amount, d.notify_attempts
+RETURNING i.id, i.partner_id, i.amount, i.notify_attempts,
+    (SELECT COALESCE(SUM(d.amount), 0)::bigint FROM deposits d WHERE d.invoice_id = i.id AND d.status = 'credited') AS credited
 `
 
 type ClaimNotificationsParams struct {
@@ -32,11 +33,10 @@ type ClaimNotificationsParams struct {
 
 type ClaimNotificationsRow struct {
 	ID             int64
-	InvoiceID      int64
 	PartnerID      int64
-	TxHash         string
 	Amount         money.Amount
 	NotifyAttempts int32
+	Credited       int64
 }
 
 func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotificationsParams) ([]ClaimNotificationsRow, error) {
@@ -50,11 +50,10 @@ func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotifications
 		var i ClaimNotificationsRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.InvoiceID,
 			&i.PartnerID,
-			&i.TxHash,
 			&i.Amount,
 			&i.NotifyAttempts,
+			&i.Credited,
 		); err != nil {
 			return nil, err
 		}
@@ -67,7 +66,7 @@ func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotifications
 }
 
 const markNotified = `-- name: MarkNotified :exec
-UPDATE deposits
+UPDATE invoices
 SET notified_at = now()
 WHERE id = ANY ($1::bigint[]) AND notified_at IS NULL
 `
@@ -78,11 +77,11 @@ func (q *Queries) MarkNotified(ctx context.Context, ids []int64) error {
 }
 
 const scheduleNotifyRetries = `-- name: ScheduleNotifyRetries :exec
-UPDATE deposits d
-SET notify_attempts        = d.notify_attempts + 1,
+UPDATE invoices i
+SET notify_attempts        = i.notify_attempts + 1,
     notify_next_attempt_at = now() + make_interval(secs => r.delay_seconds)
 FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::float8[]) AS delay_seconds) r
-WHERE d.id = r.id AND d.notified_at IS NULL
+WHERE i.id = r.id AND i.notified_at IS NULL
 `
 
 type ScheduleNotifyRetriesParams struct {

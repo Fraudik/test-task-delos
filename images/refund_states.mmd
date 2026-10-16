@@ -1,0 +1,10 @@
+---
+title: Возврат
+---
+stateDiagram-v2
+  direction LR
+  [*] --> sent: подписали и отправили
+  sent --> sent: застряла, повтор с тем же nonce
+  sent --> confirmed: нужное число блоков
+  sent --> failed: транзакция откатилась
+  failed --> sent: после отката
