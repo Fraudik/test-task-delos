@@ -1,4 +1,21 @@
 version: "2"
+overrides:
+  go:
+    overrides:
+      - column: ledger_accounts.balance
+        go_type: &amount
+          import: test-task-dellos/internal/money
+          type: Amount
+      - column: ledger_entries.amount
+        go_type: *amount
+      - column: deposits.amount
+        go_type: *amount
+      - column: refunds.amount
+        go_type: *amount
+      - column: partners.fee_fixed
+        go_type: *amount
+      - column: deposits.fee_fixed
+        go_type: *amount
 sql:
   - engine: postgresql
     schema: internal/postgres/migrations
@@ -9,34 +26,75 @@ sql:
         package: ledgerdb
         out: internal/ledger/ledgerdb
         sql_package: pgx/v5
-        emit_methods_with_db_argument: false
-        overrides:
-          - column: ledger_accounts.balance
-            go_type:
-              import: test-task-dellos/internal/money
-              type: Amount
-          - column: ledger_entries.amount
-            go_type:
-              import: test-task-dellos/internal/money
-              type: Amount
   - engine: postgresql
     schema: internal/postgres/migrations
-    queries: internal/processing/queries.sql
+    queries: internal/processing/deposit/queries.sql
     strict_function_checks: true
     gen:
       go:
-        package: processingdb
-        out: internal/processing/processingdb
+        package: depositdb
+        out: internal/processing/deposit/depositdb
         sql_package: pgx/v5
-        emit_methods_with_db_argument: false
-        emit_enum_valid_method: true
-        emit_all_enum_values: true
-        overrides:
-          - column: deposits.amount
-            go_type:
-              import: test-task-dellos/internal/money
-              type: Amount
-          - column: refunds.amount
-            go_type:
-              import: test-task-dellos/internal/money
-              type: Amount
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/processing/scanner/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: scannerdb
+        out: internal/processing/scanner/scannerdb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/processing/confirmations/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: confirmationsdb
+        out: internal/processing/confirmations/confirmationsdb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/processing/screening/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: screeningdb
+        out: internal/processing/screening/screeningdb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/processing/settlement/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: settlementdb
+        out: internal/processing/settlement/settlementdb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/api/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: apidb
+        out: internal/api/apidb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/notify/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: notifydb
+        out: internal/notify/notifydb
+        sql_package: pgx/v5
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/transfers/queries.sql
+    strict_function_checks: true
+    gen:
+      go:
+        package: transfersdb
+        out: internal/transfers/transfersdb
+        sql_package: pgx/v5
