@@ -143,10 +143,15 @@ func (ns NullRefundStatus) Value() (driver.Value, error) {
 	return string(ns.RefundStatus), nil
 }
 
+type ChainBlock struct {
+	CursorName string
+	Number     int64
+	Hash       string
+}
+
 type ChainCursor struct {
 	Name      string
 	NextBlock int64
-	LastHash  string
 	UpdatedAt pgtype.Timestamptz
 }
 

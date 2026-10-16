@@ -59,6 +59,11 @@ func (c *countingChain) BlockHash(ctx context.Context, number uint64) (string, e
 	return c.Client.BlockHash(ctx, number)
 }
 
+func (c *countingChain) BlockHashes(ctx context.Context, from, to uint64) ([]string, error) {
+	c.inc("BlockHashes")
+	return c.Client.BlockHashes(ctx, from, to)
+}
+
 func (c *countingChain) GetTransfers(ctx context.Context, from, to uint64) ([]chain.Transfer, error) {
 	c.inc("GetTransfers")
 	return c.Client.GetTransfers(ctx, from, to)
@@ -393,7 +398,7 @@ func TestReprocessingAndRescanDoNotDuplicate(t *testing.T) {
 	e.assertBalances(want)
 
 	restarted := e.newProcessor()
-	if _, err := e.db.Exec(t.Context(), `UPDATE chain_cursors SET next_block = 0, last_hash = ''`); err != nil {
+	if _, err := e.db.Exec(t.Context(), `WITH c AS (UPDATE chain_cursors SET next_block = 0 RETURNING name) DELETE FROM chain_blocks b USING c WHERE b.cursor_name = c.name`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.db.Exec(t.Context(), resetForReprocessing); err != nil {
@@ -1026,4 +1031,145 @@ func TestTransferAfterInvoicePaidStaysOnHold(t *testing.T) {
 		ledger.PartnerAvailable(pid): 10 * money.OneUSDT,
 		ledger.PartnerHold(pid):      5 * money.OneUSDT,
 	})
+}
+
+func (e *env) assertStoredHashesMatchChain() {
+	e.t.Helper()
+	rows, err := e.db.Query(e.t.Context(), `SELECT number, hash FROM chain_blocks ORDER BY number`)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n int64
+		var stored string
+		if err := rows.Scan(&n, &stored); err != nil {
+			e.t.Fatal(err)
+		}
+		if h, err := e.sim.BlockHash(e.t.Context(), uint64(n)); err != nil || h != stored {
+			e.t.Errorf("stored hash of block %d = %s, chain has %s (%v)", n, stored, h, err)
+		}
+	}
+}
+
+func TestDeepReorgRewindsToCommonAncestor(t *testing.T) {
+	e := newEnv(t)
+	e.sim.AddBlocks(3)
+	tr := e.send(payer, e.invoice(e.partner(0)), money.OneUSDT) // block 4
+	e.sim.AddBlocks(10)                                         // head 14
+	e.step("scan", e.proc.ScanBlocks)
+	e.assertStatus(tr, "pending")
+
+	if _, err := e.sim.Reorg(12); err != nil { // replaces blocks 3..14, common ancestor is block 2
+		t.Fatal(err)
+	}
+	e.step("scan", e.proc.ScanBlocks)
+	e.assertStatus(tr, "orphaned")
+	e.assertStoredHashesMatchChain()
+
+	for range 3 {
+		e.tick()
+	}
+	e.assertStatus(tr, "orphaned")
+	if n := e.count(`SELECT count(*) FROM ledger_transactions`); n != 0 {
+		t.Errorf("%d ledger transactions after deep reorg, want 0", n)
+	}
+}
+
+func TestDeepReorgMovesReincludedTransfer(t *testing.T) {
+	e := newEnv(t)
+	pid := e.partner(0)
+	e.sim.AddBlocks(3)
+	tr := e.send(payer, e.invoice(pid), money.OneUSDT) // block 4
+	e.sim.AddBlocks(10)
+	e.step("scan", e.proc.ScanBlocks)
+
+	if _, err := e.sim.ReorgWithReinclusion(12); err != nil { // transfer lands in the new block 3
+		t.Fatal(err)
+	}
+	for range 3 {
+		e.tick()
+	}
+	e.assertStatus(tr, "credited")
+	var block int64
+	if err := e.db.QueryRow(t.Context(), `SELECT block_number FROM deposits WHERE tx_hash = $1`, tr.TxHash).Scan(&block); err != nil {
+		t.Fatal(err)
+	}
+	if block != 3 {
+		t.Errorf("deposit block = %d, want 3", block)
+	}
+	if n := e.count(`SELECT count(*) FROM ledger_transactions`); n != 2 {
+		t.Errorf("%d ledger transactions, want 2", n)
+	}
+	e.assertBalances(map[ledger.Account]money.Amount{ledger.PartnerAvailable(pid): money.OneUSDT, ledger.PartnerHold(pid): 0})
+}
+
+func TestReorgDeeperThanHistoryRescansFromStart(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.ReorgHistory = 6
+	proc := e.newProcessor()
+	e.sim.AddBlocks(3)
+	tr := e.send(payer, e.invoice(e.partner(0)), money.OneUSDT) // block 4
+	e.sim.AddBlocks(10)
+	e.step("scan", proc.ScanBlocks)
+	if n := e.count(`SELECT count(*) FROM chain_blocks WHERE number BETWEEN 9 AND 14`); n != 6 || e.count(`SELECT count(*) FROM chain_blocks`) != 6 {
+		t.Fatalf("stored blocks = %d, want only the last 6", e.count(`SELECT count(*) FROM chain_blocks`))
+	}
+
+	if _, err := e.sim.Reorg(12); err != nil { // every stored block is replaced
+		t.Fatal(err)
+	}
+	e.step("scan", proc.ScanBlocks)
+	e.assertStatus(tr, "orphaned")
+	e.assertStoredHashesMatchChain()
+	if n := e.count(`SELECT count(*) FROM chain_blocks`); n != 6 {
+		t.Errorf("stored blocks after rescan = %d, want 6", n)
+	}
+}
+
+type reorgDuringScan struct {
+	chain.Client
+	sim   *simulator.Simulator
+	depth int
+	once  sync.Once
+}
+
+func (c *reorgDuringScan) GetTransfers(ctx context.Context, from, to uint64) ([]chain.Transfer, error) {
+	transfers, err := c.Client.GetTransfers(ctx, from, to)
+	c.once.Do(func() {
+		if _, rerr := c.sim.Reorg(c.depth); rerr != nil {
+			err = rerr
+		}
+	})
+	return transfers, err
+}
+
+func TestScanDiscardsBatchWhenChainChangesMidway(t *testing.T) {
+	e := newEnv(t)
+	e.sim.AddBlocks(1)
+	e.step("scan", e.proc.ScanBlocks)
+	tr := e.send(payer, e.invoice(e.partner(0)), money.OneUSDT) // block 2
+	e.sim.AddBlocks(1)                                          // head 3
+
+	racing, err := processing.New(e.db, &reorgDuringScan{Client: e.sim, sim: e.sim, depth: 2}, e.aml, e.cfg, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := racing.ScanBlocks(t.Context()); err != nil || n != 0 {
+		t.Fatalf("scan during reorg = %d, %v; want the batch discarded", n, err)
+	}
+	if n := e.count(`SELECT count(*) FROM deposits WHERE tx_hash = $1`, tr.TxHash); n != 0 {
+		t.Errorf("deposit recorded from a block that was replaced during the scan")
+	}
+	if n := e.count(`SELECT next_block FROM chain_cursors`); n != 2 {
+		t.Errorf("cursor = %d after discarded batch, want 2", n)
+	}
+
+	for range 3 {
+		e.tick()
+	}
+	if n := e.count(`SELECT count(*) FROM deposits`); n != 0 {
+		t.Errorf("%d deposits for a transfer that is not on the chain, want 0", n)
+	}
+	e.assertStoredHashesMatchChain()
 }

@@ -38,7 +38,15 @@ LEFT JOIN deposit_aml_checks a ON a.deposit_id = d.id
 WHERE d.invoice_id = @invoice_id
 ORDER BY d.id;
 
--- name: RewindCursor :execrows
-UPDATE chain_cursors
-SET next_block = @next_block, last_hash = '', updated_at = now()
-WHERE name = @name AND next_block > @next_block;
+-- name: RewindCursor :one
+WITH rewound AS (
+    UPDATE chain_cursors
+    SET next_block = @next_block, updated_at = now()
+    WHERE name = @name AND next_block > @next_block
+    RETURNING name
+), forgotten AS (
+    DELETE FROM chain_blocks b
+    USING rewound r
+    WHERE b.cursor_name = r.name AND b.number >= @next_block
+)
+SELECT count(*) FROM rewound;

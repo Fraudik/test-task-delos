@@ -84,6 +84,23 @@ func (s *Simulator) BlockHash(_ context.Context, number uint64) (string, error) 
 	return s.blocks[number].hash, nil
 }
 
+// BlockHashes returns the hashes of canonical blocks in [from, to]
+func (s *Simulator) BlockHashes(_ context.Context, from, to uint64) ([]string, error) {
+	if from > to {
+		return nil, fmt.Errorf("simulator: invalid block range %d..%d", from, to)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if to >= uint64(len(s.blocks)) {
+		return nil, chain.ErrBlockNotFound
+	}
+	hashes := make([]string, 0, to-from+1)
+	for n := from; n <= to; n++ {
+		hashes = append(hashes, s.blocks[n].hash)
+	}
+	return hashes, nil
+}
+
 // GetTransfers returns transfers from canonical blocks in [from, to]; heights above head are skipped
 func (s *Simulator) GetTransfers(_ context.Context, from, to uint64) ([]chain.Transfer, error) {
 	s.mu.RLock()

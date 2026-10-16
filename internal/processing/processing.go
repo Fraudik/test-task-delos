@@ -50,9 +50,9 @@ func New(db *pgxpool.Pool, c chain.Client, checker aml.Checker, cfg Config, log 
 	wakeSettlement := func() { p.wake(stageSettlement) }
 
 	p.scanner = scanner.New(db, c, scanner.Config{
-		Confirmations: cfg.Confirmations,
-		StartBlock:    cfg.StartBlock,
-		ScanBatch:     cfg.ScanBatch,
+		StartBlock:   cfg.StartBlock,
+		ScanBatch:    cfg.ScanBatch,
+		ReorgHistory: cfg.ReorgHistory,
 	}, log)
 	p.confirmations = confirmations.New(db, confirmations.Config{
 		Confirmations: cfg.Confirmations,

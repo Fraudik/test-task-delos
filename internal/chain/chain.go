@@ -23,5 +23,7 @@ type Transfer struct {
 type Client interface {
 	HeadBlock(ctx context.Context) (uint64, error)
 	BlockHash(ctx context.Context, number uint64) (string, error)
+	// BlockHashes returns the hashes of canonical blocks in [from, to]; ErrBlockNotFound if to is above head
+	BlockHashes(ctx context.Context, from, to uint64) ([]string, error)
 	GetTransfers(ctx context.Context, from, to uint64) ([]Transfer, error)
 }

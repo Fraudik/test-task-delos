@@ -188,10 +188,18 @@ func (q *Queries) PartnerByAPIKeyHash(ctx context.Context, apiKeyHash string) (P
 	return i, err
 }
 
-const rewindCursor = `-- name: RewindCursor :execrows
-UPDATE chain_cursors
-SET next_block = $1, last_hash = '', updated_at = now()
-WHERE name = $2 AND next_block > $1
+const rewindCursor = `-- name: RewindCursor :one
+WITH rewound AS (
+    UPDATE chain_cursors
+    SET next_block = $1, updated_at = now()
+    WHERE name = $2 AND next_block > $1
+    RETURNING name
+), forgotten AS (
+    DELETE FROM chain_blocks b
+    USING rewound r
+    WHERE b.cursor_name = r.name AND b.number >= $1
+)
+SELECT count(*) FROM rewound
 `
 
 type RewindCursorParams struct {
@@ -200,11 +208,10 @@ type RewindCursorParams struct {
 }
 
 func (q *Queries) RewindCursor(ctx context.Context, arg RewindCursorParams) (int64, error) {
-	result, err := q.db.Exec(ctx, rewindCursor, arg.NextBlock, arg.Name)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, rewindCursor, arg.NextBlock, arg.Name)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const upsertPartner = `-- name: UpsertPartner :one

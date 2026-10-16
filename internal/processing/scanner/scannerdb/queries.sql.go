@@ -39,22 +39,32 @@ func (q *Queries) EnsureCursor(ctx context.Context, arg EnsureCursorParams) erro
 	return err
 }
 
+const forgetBlocksFrom = `-- name: ForgetBlocksFrom :exec
+DELETE FROM chain_blocks
+WHERE cursor_name = $1 AND number >= $2
+`
+
+type ForgetBlocksFromParams struct {
+	CursorName string
+	FromBlock  int64
+}
+
+func (q *Queries) ForgetBlocksFrom(ctx context.Context, arg ForgetBlocksFromParams) error {
+	_, err := q.db.Exec(ctx, forgetBlocksFrom, arg.CursorName, arg.FromBlock)
+	return err
+}
+
 const getCursor = `-- name: GetCursor :one
-SELECT next_block, last_hash
+SELECT next_block
 FROM chain_cursors
 WHERE name = $1
 `
 
-type GetCursorRow struct {
-	NextBlock int64
-	LastHash  string
-}
-
-func (q *Queries) GetCursor(ctx context.Context, name string) (GetCursorRow, error) {
+func (q *Queries) GetCursor(ctx context.Context, name string) (int64, error) {
 	row := q.db.QueryRow(ctx, getCursor, name)
-	var i GetCursorRow
-	err := row.Scan(&i.NextBlock, &i.LastHash)
-	return i, err
+	var next_block int64
+	err := row.Scan(&next_block)
+	return next_block, err
 }
 
 const invoicesByAddresses = `-- name: InvoicesByAddresses :many
@@ -141,21 +151,111 @@ func (q *Queries) PendingDepositsFrom(ctx context.Context, fromBlock int64) ([]P
 	return items, nil
 }
 
+const pruneBlocksBelow = `-- name: PruneBlocksBelow :exec
+DELETE FROM chain_blocks
+WHERE cursor_name = $1 AND number < $2
+`
+
+type PruneBlocksBelowParams struct {
+	CursorName string
+	Below      int64
+}
+
+func (q *Queries) PruneBlocksBelow(ctx context.Context, arg PruneBlocksBelowParams) error {
+	_, err := q.db.Exec(ctx, pruneBlocksBelow, arg.CursorName, arg.Below)
+	return err
+}
+
+const saveBlocks = `-- name: SaveBlocks :exec
+INSERT INTO chain_blocks (cursor_name, number, hash)
+SELECT $1, b.number, b.hash
+FROM (
+    SELECT unnest($2::bigint[]) AS number,
+           unnest($3::text[])    AS hash
+) b
+ON CONFLICT (cursor_name, number) DO UPDATE SET hash = EXCLUDED.hash
+`
+
+type SaveBlocksParams struct {
+	CursorName string
+	Numbers    []int64
+	Hashes     []string
+}
+
+func (q *Queries) SaveBlocks(ctx context.Context, arg SaveBlocksParams) error {
+	_, err := q.db.Exec(ctx, saveBlocks, arg.CursorName, arg.Numbers, arg.Hashes)
+	return err
+}
+
 const saveCursor = `-- name: SaveCursor :exec
 UPDATE chain_cursors
-SET next_block = $1, last_hash = $2, updated_at = now()
-WHERE name = $3
+SET next_block = $1, updated_at = now()
+WHERE name = $2
 `
 
 type SaveCursorParams struct {
 	NextBlock int64
-	LastHash  string
 	Name      string
 }
 
 func (q *Queries) SaveCursor(ctx context.Context, arg SaveCursorParams) error {
-	_, err := q.db.Exec(ctx, saveCursor, arg.NextBlock, arg.LastHash, arg.Name)
+	_, err := q.db.Exec(ctx, saveCursor, arg.NextBlock, arg.Name)
 	return err
+}
+
+const storedBlockHash = `-- name: StoredBlockHash :one
+SELECT hash
+FROM chain_blocks
+WHERE cursor_name = $1 AND number = $2
+`
+
+type StoredBlockHashParams struct {
+	CursorName string
+	Number     int64
+}
+
+func (q *Queries) StoredBlockHash(ctx context.Context, arg StoredBlockHashParams) (string, error) {
+	row := q.db.QueryRow(ctx, storedBlockHash, arg.CursorName, arg.Number)
+	var hash string
+	err := row.Scan(&hash)
+	return hash, err
+}
+
+const storedBlocksBelow = `-- name: StoredBlocksBelow :many
+SELECT number, hash
+FROM chain_blocks
+WHERE cursor_name = $1 AND number < $2
+ORDER BY number DESC
+`
+
+type StoredBlocksBelowParams struct {
+	CursorName string
+	Below      int64
+}
+
+type StoredBlocksBelowRow struct {
+	Number int64
+	Hash   string
+}
+
+func (q *Queries) StoredBlocksBelow(ctx context.Context, arg StoredBlocksBelowParams) ([]StoredBlocksBelowRow, error) {
+	rows, err := q.db.Query(ctx, storedBlocksBelow, arg.CursorName, arg.Below)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StoredBlocksBelowRow
+	for rows.Next() {
+		var i StoredBlocksBelowRow
+		if err := rows.Scan(&i.Number, &i.Hash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const upsertDeposit = `-- name: UpsertDeposit :one

@@ -11,6 +11,7 @@ type Config struct {
 	Confirmations  uint64
 	StartBlock     uint64
 	ScanBatch      uint64
+	ReorgHistory   uint64
 	BatchSize      int32
 	PollInterval   time.Duration
 	AMLConcurrency int
@@ -24,6 +25,7 @@ func DefaultConfig() Config {
 	return Config{
 		Confirmations:  5,
 		ScanBatch:      500,
+		ReorgHistory:   1024,
 		BatchSize:      100,
 		PollInterval:   time.Second,
 		AMLConcurrency: 8,
@@ -41,6 +43,9 @@ func (c Config) validate() error {
 	}
 	if c.ScanBatch == 0 {
 		errs = append(errs, errors.New("ScanBatch must be at least 1"))
+	}
+	if c.ReorgHistory <= c.Confirmations {
+		errs = append(errs, errors.New("ReorgHistory must be longer than Confirmations"))
 	}
 	if c.BatchSize <= 0 {
 		errs = append(errs, errors.New("BatchSize must be positive"))

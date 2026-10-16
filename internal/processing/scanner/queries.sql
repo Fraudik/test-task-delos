@@ -4,14 +4,42 @@ VALUES (@name, @next_block)
 ON CONFLICT (name) DO NOTHING;
 
 -- name: GetCursor :one
-SELECT next_block, last_hash
+SELECT next_block
 FROM chain_cursors
 WHERE name = @name;
 
 -- name: SaveCursor :exec
 UPDATE chain_cursors
-SET next_block = @next_block, last_hash = @last_hash, updated_at = now()
+SET next_block = @next_block, updated_at = now()
 WHERE name = @name;
+
+-- name: StoredBlockHash :one
+SELECT hash
+FROM chain_blocks
+WHERE cursor_name = @cursor_name AND number = @number;
+
+-- name: StoredBlocksBelow :many
+SELECT number, hash
+FROM chain_blocks
+WHERE cursor_name = @cursor_name AND number < @below
+ORDER BY number DESC;
+
+-- name: SaveBlocks :exec
+INSERT INTO chain_blocks (cursor_name, number, hash)
+SELECT @cursor_name, b.number, b.hash
+FROM (
+    SELECT unnest(@numbers::bigint[]) AS number,
+           unnest(@hashes::text[])    AS hash
+) b
+ON CONFLICT (cursor_name, number) DO UPDATE SET hash = EXCLUDED.hash;
+
+-- name: ForgetBlocksFrom :exec
+DELETE FROM chain_blocks
+WHERE cursor_name = @cursor_name AND number >= @from_block;
+
+-- name: PruneBlocksBelow :exec
+DELETE FROM chain_blocks
+WHERE cursor_name = @cursor_name AND number < @below;
 
 -- name: InvoicesByAddresses :many
 SELECT i.id, i.partner_id, i.address

@@ -118,6 +118,30 @@ func TestBlockHash(t *testing.T) {
 	})
 }
 
+func TestBlockHashes(t *testing.T) {
+	s := New()
+	s.AddBlocks(4)
+
+	hashes, err := s.BlockHashes(t.Context(), 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 3 {
+		t.Fatalf("got %d hashes, want 3", len(hashes))
+	}
+	for i, h := range hashes {
+		if want := mustHash(t, s, uint64(i+1)); h != want {
+			t.Errorf("hash of block %d = %s, want %s", i+1, h, want)
+		}
+	}
+	if _, err := s.BlockHashes(t.Context(), 3, 5); !errors.Is(err, chain.ErrBlockNotFound) {
+		t.Errorf("range above head: err = %v, want ErrBlockNotFound", err)
+	}
+	if _, err := s.BlockHashes(t.Context(), 3, 2); err == nil {
+		t.Error("inverted range: expected error")
+	}
+}
+
 func TestGetTransfers(t *testing.T) {
 	s := New()
 	a := mustSend(t, s, "a", "b", 1) // block 1
