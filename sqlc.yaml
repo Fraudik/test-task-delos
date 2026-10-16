@@ -32,6 +32,7 @@ sql:
         package: ledgerdb
         out: internal/ledger/ledgerdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/processing/deposit/queries.sql
@@ -41,6 +42,7 @@ sql:
         package: depositdb
         out: internal/processing/deposit/depositdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/processing/scanner/queries.sql
@@ -50,6 +52,7 @@ sql:
         package: scannerdb
         out: internal/processing/scanner/scannerdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/processing/confirmations/queries.sql
@@ -59,6 +62,7 @@ sql:
         package: confirmationsdb
         out: internal/processing/confirmations/confirmationsdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/processing/screening/queries.sql
@@ -68,6 +72,7 @@ sql:
         package: screeningdb
         out: internal/processing/screening/screeningdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/processing/settlement/queries.sql
@@ -77,6 +82,7 @@ sql:
         package: settlementdb
         out: internal/processing/settlement/settlementdb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/api/queries.sql
@@ -86,6 +92,7 @@ sql:
         package: apidb
         out: internal/api/apidb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/notify/queries.sql
@@ -95,6 +102,7 @@ sql:
         package: notifydb
         out: internal/notify/notifydb
         sql_package: pgx/v5
+        omit_unused_structs: true
   - engine: postgresql
     schema: internal/postgres/migrations
     queries: internal/transfers/queries.sql
@@ -104,3 +112,4 @@ sql:
         package: transfersdb
         out: internal/transfers/transfersdb
         sql_package: pgx/v5
+        omit_unused_structs: true

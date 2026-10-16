@@ -37,15 +37,6 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	})
 }
 
-func Rollback(ctx context.Context, pool *pgxpool.Pool, version int64) error {
-	return withProvider(pool, func(p *goose.Provider) error {
-		if _, err := p.DownTo(ctx, version); err != nil {
-			return fmt.Errorf("postgres: migrate down to %d: %w", version, err)
-		}
-		return nil
-	})
-}
-
 func Migrations() (fs.FS, error) {
 	return fs.Sub(embedded, "migrations")
 }
