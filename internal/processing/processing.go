@@ -12,7 +12,10 @@ import (
 
 	"test-task-dellos/internal/aml"
 	"test-task-dellos/internal/chain"
-	"test-task-dellos/internal/money"
+	"test-task-dellos/internal/processing/confirmations"
+	"test-task-dellos/internal/processing/scanner"
+	"test-task-dellos/internal/processing/screening"
+	"test-task-dellos/internal/processing/settlement"
 )
 
 const (
@@ -23,12 +26,13 @@ const (
 )
 
 type Processor struct {
-	db      *pgxpool.Pool
-	chain   chain.Client
-	aml     aml.Checker
-	cfg     Config
-	log     *slog.Logger
-	wakeups map[string]chan struct{}
+	cfg           Config
+	log           *slog.Logger
+	scanner       *scanner.Stage
+	confirmations *confirmations.Stage
+	screening     *screening.Stage
+	settlement    *settlement.Stage
+	wakeups       map[string]chan struct{}
 }
 
 func New(db *pgxpool.Pool, c chain.Client, checker aml.Checker, cfg Config, log *slog.Logger) (*Processor, error) {
@@ -38,18 +42,48 @@ func New(db *pgxpool.Pool, c chain.Client, checker aml.Checker, cfg Config, log 
 	if log == nil {
 		log = slog.Default()
 	}
-	wakeups := make(map[string]chan struct{})
+	log = log.With("component", "processing")
+	p := &Processor{cfg: cfg, log: log, wakeups: make(map[string]chan struct{})}
 	for _, name := range []string{stageScan, stageConfirmations, stageAML, stageSettlement} {
-		wakeups[name] = make(chan struct{}, 1)
+		p.wakeups[name] = make(chan struct{}, 1)
 	}
-	return &Processor{
-		db:      db,
-		chain:   c,
-		aml:     checker,
-		cfg:     cfg,
-		log:     log.With("component", "processing"),
-		wakeups: wakeups,
-	}, nil
+	wakeSettlement := func() { p.wake(stageSettlement) }
+
+	p.scanner = scanner.New(db, c, scanner.Config{
+		Confirmations: cfg.Confirmations,
+		StartBlock:    cfg.StartBlock,
+		ScanBatch:     cfg.ScanBatch,
+	}, log)
+	p.confirmations = confirmations.New(db, confirmations.Config{
+		Confirmations: cfg.Confirmations,
+		BatchSize:     cfg.BatchSize,
+	}, log, wakeSettlement)
+	p.screening = screening.New(db, checker, screening.Config{
+		BatchSize:   cfg.BatchSize,
+		Concurrency: cfg.AMLConcurrency,
+		Timeout:     cfg.AMLTimeout,
+		Lease:       cfg.AMLLease,
+		BackoffBase: cfg.AMLBackoffBase,
+		BackoffMax:  cfg.AMLBackoffMax,
+	}, log, wakeSettlement)
+	p.settlement = settlement.New(db, settlement.Config{BatchSize: cfg.BatchSize}, log)
+	return p, nil
+}
+
+func (p *Processor) ScanBlocks(ctx context.Context) (int, error) {
+	return p.scanner.Run(ctx)
+}
+
+func (p *Processor) ProcessConfirmations(ctx context.Context) (int, error) {
+	return p.confirmations.Run(ctx)
+}
+
+func (p *Processor) ProcessAML(ctx context.Context) (int, error) {
+	return p.screening.Run(ctx)
+}
+
+func (p *Processor) ProcessSettlement(ctx context.Context) (int, error) {
+	return p.settlement.Run(ctx)
 }
 
 func (p *Processor) wake(stage string) {
@@ -134,19 +168,4 @@ func (p *Processor) loop(ctx context.Context, s stage) {
 		case <-p.wakeups[s.name]:
 		}
 	}
-}
-
-func depositKey(depositID int64, step string) string {
-	return fmt.Sprintf("deposit:%d:%s", depositID, step)
-}
-
-func splitFee(amount money.Amount, feeBps int32, feeFixed money.Amount) (net, fee money.Amount) {
-	const scale = 10_000
-	bps := money.Amount(feeBps)
-	fee = amount/scale*bps + amount%scale*bps/scale
-	if feeFixed >= amount-fee {
-		return 0, amount
-	}
-	fee += feeFixed
-	return amount - fee, fee
 }

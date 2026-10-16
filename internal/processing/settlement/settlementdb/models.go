@@ -2,7 +2,7 @@
 // versions:
 //   sqlc v1.31.1
 
-package processingdb
+package settlementdb
 
 import (
 	"database/sql/driver"
@@ -58,30 +58,6 @@ func (ns NullDepositStatus) Value() (driver.Value, error) {
 	return string(ns.DepositStatus), nil
 }
 
-func (e DepositStatus) Valid() bool {
-	switch e {
-	case DepositStatusPending,
-		DepositStatusOrphaned,
-		DepositStatusConfirmed,
-		DepositStatusCredited,
-		DepositStatusRefunded,
-		DepositStatusNeedsReview:
-		return true
-	}
-	return false
-}
-
-func AllDepositStatusValues() []DepositStatus {
-	return []DepositStatus{
-		DepositStatusPending,
-		DepositStatusOrphaned,
-		DepositStatusConfirmed,
-		DepositStatusCredited,
-		DepositStatusRefunded,
-		DepositStatusNeedsReview,
-	}
-}
-
 type RefundStatus string
 
 const (
@@ -122,22 +98,6 @@ func (ns NullRefundStatus) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(ns.RefundStatus), nil
-}
-
-func (e RefundStatus) Valid() bool {
-	switch e {
-	case RefundStatusReadyToSend,
-		RefundStatusInitiated:
-		return true
-	}
-	return false
-}
-
-func AllRefundStatusValues() []RefundStatus {
-	return []RefundStatus{
-		RefundStatusReadyToSend,
-		RefundStatusInitiated,
-	}
 }
 
 type ChainCursor struct {
