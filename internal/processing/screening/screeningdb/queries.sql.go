@@ -13,7 +13,7 @@ import (
 
 const claimAMLChecks = `-- name: ClaimAMLChecks :many
 UPDATE deposit_aml_checks a
-SET next_attempt_at = now() + make_interval(secs => $1::float8)
+SET leased_until = now() + make_interval(secs => $1::float8)
 FROM deposits d
 WHERE d.id = a.deposit_id
   AND a.deposit_id IN (
@@ -22,6 +22,7 @@ WHERE d.id = a.deposit_id
     JOIN deposits cd ON cd.id = c.deposit_id
     WHERE c.risk = ''
       AND c.next_attempt_at <= now()
+      AND (c.leased_until IS NULL OR c.leased_until <= now())
       AND cd.status IN ('pending', 'confirmed')
     ORDER BY c.next_attempt_at, c.deposit_id
     LIMIT $2
@@ -73,10 +74,12 @@ func (q *Queries) ClaimAMLChecks(ctx context.Context, arg ClaimAMLChecksParams) 
 
 const recordAMLResults = `-- name: RecordAMLResults :execrows
 UPDATE deposit_aml_checks a
-SET risk            = r.risk,
-    reason          = r.reason,
-    next_attempt_at = NULL,
-    checked_at      = now()
+SET risk                 = r.risk,
+    reason               = r.reason,
+    next_attempt_at      = NULL,
+    leased_until         = NULL,
+    waiting_for_provider = false,
+    checked_at           = now()
 FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS risk, unnest($3::text[]) AS reason) r
 WHERE a.deposit_id = r.id AND a.risk = ''
 `
@@ -95,20 +98,41 @@ func (q *Queries) RecordAMLResults(ctx context.Context, arg RecordAMLResultsPara
 	return result.RowsAffected(), nil
 }
 
+const releaseWaitingAMLChecks = `-- name: ReleaseWaitingAMLChecks :execrows
+UPDATE deposit_aml_checks
+SET next_attempt_at = now()
+WHERE risk = '' AND waiting_for_provider AND next_attempt_at > now()
+`
+
+func (q *Queries) ReleaseWaitingAMLChecks(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseWaitingAMLChecks)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const scheduleAMLRetries = `-- name: ScheduleAMLRetries :exec
 UPDATE deposit_aml_checks a
-SET attempts        = a.attempts + 1,
-    next_attempt_at = now() + make_interval(secs => r.delay_seconds)
-FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::float8[]) AS delay_seconds) r
+SET attempts             = a.attempts + 1,
+    next_attempt_at      = now() + make_interval(secs => r.delay_seconds),
+    leased_until         = NULL,
+    waiting_for_provider = r.waiting_for_provider
+FROM (
+    SELECT unnest($1::bigint[])                    AS id,
+           unnest($2::float8[])         AS delay_seconds,
+           unnest($3::boolean[])  AS waiting_for_provider
+) r
 WHERE a.deposit_id = r.id AND a.risk = ''
 `
 
 type ScheduleAMLRetriesParams struct {
-	Ids           []int64
-	DelaysSeconds []float64
+	Ids                []int64
+	DelaysSeconds      []float64
+	WaitingForProvider []bool
 }
 
 func (q *Queries) ScheduleAMLRetries(ctx context.Context, arg ScheduleAMLRetriesParams) error {
-	_, err := q.db.Exec(ctx, scheduleAMLRetries, arg.Ids, arg.DelaysSeconds)
+	_, err := q.db.Exec(ctx, scheduleAMLRetries, arg.Ids, arg.DelaysSeconds, arg.WaitingForProvider)
 	return err
 }

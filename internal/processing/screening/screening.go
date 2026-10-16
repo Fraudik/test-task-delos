@@ -59,9 +59,10 @@ func (s *Stage) Run(ctx context.Context) (int, error) {
 	}
 
 	var (
-		results []screening
-		retries screeningdb.ScheduleAMLRetriesParams
-		errs    []error
+		results      []screening
+		retries      screeningdb.ScheduleAMLRetriesParams
+		providerDown bool
+		errs         []error
 	)
 	for _, sc := range screenings {
 		if sc.err == nil {
@@ -71,8 +72,11 @@ func (s *Stage) Run(ctx context.Context) (int, error) {
 		delay := s.backoff(sc.deposit.Attempts)
 		retries.Ids = append(retries.Ids, sc.deposit.DepositID)
 		retries.DelaysSeconds = append(retries.DelaysSeconds, delay.Seconds())
+		unavailable := errors.Is(sc.err, aml.ErrUnavailable)
+		retries.WaitingForProvider = append(retries.WaitingForProvider, unavailable)
+		providerDown = providerDown || unavailable
 		level := slog.LevelError
-		if errors.Is(sc.err, aml.ErrUnavailable) {
+		if unavailable {
 			level = slog.LevelWarn
 		}
 		s.log.Log(ctx, level, "AML check failed, will retry",
@@ -86,9 +90,24 @@ func (s *Stage) Run(ctx context.Context) (int, error) {
 	if len(results) > 0 {
 		if err := s.record(ctx, q, results); err != nil {
 			errs = append(errs, err)
+		} else if !providerDown {
+			if err := s.releaseWaiting(ctx, q); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return len(claimed), errors.Join(errs...)
+}
+
+func (s *Stage) releaseWaiting(ctx context.Context, q *screeningdb.Queries) error {
+	n, err := q.ReleaseWaitingAMLChecks(ctx)
+	if err != nil {
+		return fmt.Errorf("screening: release deferred AML checks: %w", err)
+	}
+	if n > 0 {
+		s.log.Info("AML provider is back, retrying deferred checks now", "checks", n)
+	}
+	return nil
 }
 
 func (s *Stage) screenAll(ctx context.Context, claimed []screeningdb.ClaimAMLChecksRow) []screening {
