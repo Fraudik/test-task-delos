@@ -118,7 +118,7 @@ func (s *Simulator) AddBlocks(n int) uint64 {
 	return s.addBlocksLocked(n)
 }
 
-// Reorg drops the last depth blocks and replaces them with depth+1 new blocks
+// Reorg drops the last depth blocks and replaces them with depth new blocks, so the head height stays the same
 func (s *Simulator) Reorg(depth int) (uint64, error) {
 	return s.reorg(depth, false)
 }
@@ -143,7 +143,7 @@ func (s *Simulator) reorg(depth int, reinclude bool) (uint64, error) {
 		}
 	}
 	s.createBlock(transfers)
-	s.addBlocksLocked(depth)
+	s.addBlocksLocked(depth - 1)
 	return s.headLocked(), nil
 }
 

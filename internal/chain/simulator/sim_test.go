@@ -244,8 +244,8 @@ func TestReorg(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Reorg: %v", err)
 		}
-		if head != 5 {
-			t.Errorf("head after Reorg(2) = %d, want 5", head)
+		if head != 4 {
+			t.Errorf("head after Reorg(2) = %d, want 4", head)
 		}
 		if got := mustHead(t, s); got != head {
 			t.Errorf("HeadBlock = %d, want %d", got, head)
@@ -259,9 +259,9 @@ func TestReorg(t *testing.T) {
 		}
 
 		// Reorged heights get new hashes and the new branch links to the fork point.
-		for n := uint64(3); n <= 5; n++ {
+		for n := uint64(3); n <= 4; n++ {
 			h := mustHash(t, s, n)
-			if n <= 4 && h == before[n] {
+			if h == before[n] {
 				t.Errorf("block %d hash unchanged after reorg", n)
 			}
 			if s.blocks[n].parent != mustHash(t, s, n-1) {
@@ -379,8 +379,8 @@ func TestReorgWithReinclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if head != 3 {
-		t.Errorf("head = %d, want 3", head)
+	if head != 2 {
+		t.Errorf("head = %d, want 2", head)
 	}
 	trs := mustTransfers(t, s, 0, head)
 	if len(trs) != 1 {

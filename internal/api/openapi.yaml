@@ -100,7 +100,7 @@ paths:
   /sim/reorg:
     post:
       tags: [simulator]
-      summary: Drop the last `depth` blocks and mine depth+1 new ones (optionally re-including dropped transfers)
+      summary: Drop the last `depth` blocks and mine depth new ones, head height stays the same (optionally re-including dropped transfers)
       security: []
       requestBody:
         required: true
