@@ -15,11 +15,12 @@ import (
 type DepositStatus string
 
 const (
-	DepositStatusPending    DepositStatus = "pending"
-	DepositStatusOrphaned   DepositStatus = "orphaned"
-	DepositStatusAmlPending DepositStatus = "aml_pending"
-	DepositStatusCredited   DepositStatus = "credited"
-	DepositStatusRefunded   DepositStatus = "refunded"
+	DepositStatusPending     DepositStatus = "pending"
+	DepositStatusOrphaned    DepositStatus = "orphaned"
+	DepositStatusConfirmed   DepositStatus = "confirmed"
+	DepositStatusCredited    DepositStatus = "credited"
+	DepositStatusRefunded    DepositStatus = "refunded"
+	DepositStatusNeedsReview DepositStatus = "needs_review"
 )
 
 func (e *DepositStatus) Scan(src interface{}) error {
@@ -61,9 +62,10 @@ func (e DepositStatus) Valid() bool {
 	switch e {
 	case DepositStatusPending,
 		DepositStatusOrphaned,
-		DepositStatusAmlPending,
+		DepositStatusConfirmed,
 		DepositStatusCredited,
-		DepositStatusRefunded:
+		DepositStatusRefunded,
+		DepositStatusNeedsReview:
 		return true
 	}
 	return false
@@ -73,9 +75,10 @@ func AllDepositStatusValues() []DepositStatus {
 	return []DepositStatus{
 		DepositStatusPending,
 		DepositStatusOrphaned,
-		DepositStatusAmlPending,
+		DepositStatusConfirmed,
 		DepositStatusCredited,
 		DepositStatusRefunded,
+		DepositStatusNeedsReview,
 	}
 }
 
@@ -83,6 +86,7 @@ type RefundStatus string
 
 const (
 	RefundStatusReadyToSend RefundStatus = "ready_to_send"
+	RefundStatusInitiated   RefundStatus = "initiated"
 )
 
 func (e *RefundStatus) Scan(src interface{}) error {
@@ -122,7 +126,8 @@ func (ns NullRefundStatus) Value() (driver.Value, error) {
 
 func (e RefundStatus) Valid() bool {
 	switch e {
-	case RefundStatusReadyToSend:
+	case RefundStatusReadyToSend,
+		RefundStatusInitiated:
 		return true
 	}
 	return false
@@ -131,6 +136,7 @@ func (e RefundStatus) Valid() bool {
 func AllRefundStatusValues() []RefundStatus {
 	return []RefundStatus{
 		RefundStatusReadyToSend,
+		RefundStatusInitiated,
 	}
 }
 
@@ -142,44 +148,56 @@ type ChainCursor struct {
 }
 
 type Deposit struct {
-	ID               int64
-	InvoiceID        int64
-	PartnerID        int64
-	TxHash           string
-	LogIndex         int32
-	BlockNumber      int64
-	BlockHash        string
-	FromAddress      string
-	ToAddress        string
-	Amount           money.Amount
-	FeeBps           int32
-	Status           DepositStatus
-	AmlAttempts      int32
-	AmlNextAttemptAt pgtype.Timestamptz
-	AmlRisk          string
-	AmlReason        string
-	CreatedAt        pgtype.Timestamptz
-	UpdatedAt        pgtype.Timestamptz
+	ID                  int64
+	InvoiceID           int64
+	PartnerID           int64
+	TxHash              string
+	LogIndex            int32
+	BlockNumber         int64
+	BlockHash           string
+	FromAddress         string
+	ToAddress           string
+	Amount              money.Amount
+	FeeBps              int32
+	Status              DepositStatus
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+	FeeFixed            money.Amount
+	ReviewReason        string
+	FlaggedAt           pgtype.Timestamptz
+	NotifiedAt          pgtype.Timestamptz
+	NotifyAttempts      int32
+	NotifyNextAttemptAt pgtype.Timestamptz
+}
+
+type DepositAmlCheck struct {
+	DepositID     int64
+	Risk          string
+	Reason        string
+	Attempts      int32
+	NextAttemptAt pgtype.Timestamptz
+	CheckedAt     pgtype.Timestamptz
 }
 
 type Invoice struct {
-	ID        int64
-	PartnerID int64
-	Address   string
-	CreatedAt pgtype.Timestamptz
+	ID             int64
+	PartnerID      int64
+	Address        string
+	CreatedAt      pgtype.Timestamptz
+	IdempotencyKey pgtype.Text
 }
 
 type LedgerAccount struct {
 	ID      string
 	Kind    string
-	Balance int64
+	Balance money.Amount
 }
 
 type LedgerEntry struct {
 	ID            int64
 	TransactionID int64
 	AccountID     string
-	Amount        int64
+	Amount        money.Amount
 }
 
 type LedgerTransaction struct {
@@ -190,17 +208,22 @@ type LedgerTransaction struct {
 }
 
 type Partner struct {
-	ID        int64
-	Name      string
-	FeeBps    int32
-	CreatedAt pgtype.Timestamptz
+	ID         int64
+	Name       string
+	FeeBps     int32
+	CreatedAt  pgtype.Timestamptz
+	FeeFixed   money.Amount
+	ApiKeyHash pgtype.Text
 }
 
 type Refund struct {
-	ID        int64
-	DepositID int64
-	ToAddress string
-	Amount    money.Amount
-	Status    RefundStatus
-	CreatedAt pgtype.Timestamptz
+	ID                    int64
+	DepositID             int64
+	ToAddress             string
+	Amount                money.Amount
+	Status                RefundStatus
+	CreatedAt             pgtype.Timestamptz
+	InitiatedAt           pgtype.Timestamptz
+	InitiateAttempts      int32
+	InitiateNextAttemptAt pgtype.Timestamptz
 }

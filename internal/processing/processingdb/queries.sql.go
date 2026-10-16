@@ -11,6 +11,182 @@ import (
 	"test-task-dellos/internal/money"
 )
 
+const claimAMLChecks = `-- name: ClaimAMLChecks :many
+UPDATE deposit_aml_checks a
+SET next_attempt_at = now() + make_interval(secs => $1::float8)
+FROM deposits d
+WHERE d.id = a.deposit_id
+  AND a.deposit_id IN (
+    SELECT c.deposit_id
+    FROM deposit_aml_checks c
+    JOIN deposits cd ON cd.id = c.deposit_id
+    WHERE c.risk = ''
+      AND c.next_attempt_at <= now()
+      AND cd.status IN ('pending', 'confirmed')
+    ORDER BY c.next_attempt_at, c.deposit_id
+    LIMIT $2
+    FOR UPDATE OF c SKIP LOCKED
+)
+RETURNING a.deposit_id, d.tx_hash, d.from_address, d.to_address, d.amount, a.attempts
+`
+
+type ClaimAMLChecksParams struct {
+	LeaseSeconds float64
+	MaxRows      int32
+}
+
+type ClaimAMLChecksRow struct {
+	DepositID   int64
+	TxHash      string
+	FromAddress string
+	ToAddress   string
+	Amount      money.Amount
+	Attempts    int32
+}
+
+func (q *Queries) ClaimAMLChecks(ctx context.Context, arg ClaimAMLChecksParams) ([]ClaimAMLChecksRow, error) {
+	rows, err := q.db.Query(ctx, claimAMLChecks, arg.LeaseSeconds, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimAMLChecksRow
+	for rows.Next() {
+		var i ClaimAMLChecksRow
+		if err := rows.Scan(
+			&i.DepositID,
+			&i.TxHash,
+			&i.FromAddress,
+			&i.ToAddress,
+			&i.Amount,
+			&i.Attempts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const claimReadyDeposits = `-- name: ClaimReadyDeposits :many
+SELECT d.id, d.partner_id, d.amount
+FROM deposits d
+JOIN chain_cursors c ON c.name = $1
+WHERE d.status = 'pending'
+  AND d.block_number + $2::bigint <= c.next_block
+ORDER BY d.block_number, d.id
+LIMIT $3
+FOR UPDATE OF d SKIP LOCKED
+`
+
+type ClaimReadyDepositsParams struct {
+	CursorName    string
+	Confirmations int64
+	MaxRows       int32
+}
+
+type ClaimReadyDepositsRow struct {
+	ID        int64
+	PartnerID int64
+	Amount    money.Amount
+}
+
+func (q *Queries) ClaimReadyDeposits(ctx context.Context, arg ClaimReadyDepositsParams) ([]ClaimReadyDepositsRow, error) {
+	rows, err := q.db.Query(ctx, claimReadyDeposits, arg.CursorName, arg.Confirmations, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimReadyDepositsRow
+	for rows.Next() {
+		var i ClaimReadyDepositsRow
+		if err := rows.Scan(&i.ID, &i.PartnerID, &i.Amount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const claimSettleableDeposits = `-- name: ClaimSettleableDeposits :many
+SELECT d.id, d.partner_id, d.from_address, d.amount, d.fee_bps, d.fee_fixed, a.risk AS aml_risk
+FROM deposits d
+JOIN deposit_aml_checks a ON a.deposit_id = d.id
+WHERE d.status = 'confirmed' AND a.risk <> ''
+ORDER BY d.id
+LIMIT $1
+FOR UPDATE OF d SKIP LOCKED
+`
+
+type ClaimSettleableDepositsRow struct {
+	ID          int64
+	PartnerID   int64
+	FromAddress string
+	Amount      money.Amount
+	FeeBps      int32
+	FeeFixed    money.Amount
+	AmlRisk     string
+}
+
+func (q *Queries) ClaimSettleableDeposits(ctx context.Context, maxRows int32) ([]ClaimSettleableDepositsRow, error) {
+	rows, err := q.db.Query(ctx, claimSettleableDeposits, maxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimSettleableDepositsRow
+	for rows.Next() {
+		var i ClaimSettleableDepositsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.FromAddress,
+			&i.Amount,
+			&i.FeeBps,
+			&i.FeeFixed,
+			&i.AmlRisk,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const confirmDeposits = `-- name: ConfirmDeposits :execrows
+UPDATE deposits
+SET status = 'confirmed', updated_at = now()
+WHERE id = ANY ($1::bigint[]) AND status = 'pending'
+`
+
+func (q *Queries) ConfirmDeposits(ctx context.Context, ids []int64) (int64, error) {
+	result, err := q.db.Exec(ctx, confirmDeposits, ids)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const ensureAMLCheck = `-- name: EnsureAMLCheck :exec
+INSERT INTO deposit_aml_checks (deposit_id)
+VALUES ($1)
+ON CONFLICT (deposit_id) DO NOTHING
+`
+
+func (q *Queries) EnsureAMLCheck(ctx context.Context, depositID int64) error {
+	_, err := q.db.Exec(ctx, ensureAMLCheck, depositID)
+	return err
+}
+
 const ensureCursor = `-- name: EnsureCursor :exec
 INSERT INTO chain_cursors (name, next_block)
 VALUES ($1, $2)
@@ -27,8 +203,91 @@ func (q *Queries) EnsureCursor(ctx context.Context, arg EnsureCursorParams) erro
 	return err
 }
 
+const finishDeposits = `-- name: FinishDeposits :execrows
+UPDATE deposits d
+SET status = f.status::deposit_status, updated_at = now()
+FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS status) f
+WHERE d.id = f.id AND d.status = 'confirmed'
+`
+
+type FinishDepositsParams struct {
+	Ids      []int64
+	Statuses []string
+}
+
+func (q *Queries) FinishDeposits(ctx context.Context, arg FinishDepositsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishDeposits, arg.Ids, arg.Statuses)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const flagForReview = `-- name: FlagForReview :execrows
+UPDATE deposits d
+SET status        = 'needs_review',
+    review_reason = r.reason,
+    flagged_at    = now(),
+    updated_at    = now()
+FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS reason) r
+WHERE d.id = r.id AND d.status IN ('pending', 'confirmed')
+`
+
+type FlagForReviewParams struct {
+	Ids     []int64
+	Reasons []string
+}
+
+func (q *Queries) FlagForReview(ctx context.Context, arg FlagForReviewParams) (int64, error) {
+	result, err := q.db.Exec(ctx, flagForReview, arg.Ids, arg.Reasons)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getCursor = `-- name: GetCursor :one
+SELECT next_block, last_hash
+FROM chain_cursors
+WHERE name = $1
+`
+
+type GetCursorRow struct {
+	NextBlock int64
+	LastHash  string
+}
+
+func (q *Queries) GetCursor(ctx context.Context, name string) (GetCursorRow, error) {
+	row := q.db.QueryRow(ctx, getCursor, name)
+	var i GetCursorRow
+	err := row.Scan(&i.NextBlock, &i.LastHash)
+	return i, err
+}
+
+const insertRefunds = `-- name: InsertRefunds :exec
+INSERT INTO refunds (deposit_id, to_address, amount)
+SELECT r.deposit_id, r.to_address, r.amount
+FROM (
+    SELECT unnest($1::bigint[]) AS deposit_id,
+           unnest($2::text[])  AS to_address,
+           unnest($3::bigint[])     AS amount
+) r
+ON CONFLICT (deposit_id) DO NOTHING
+`
+
+type InsertRefundsParams struct {
+	DepositIds  []int64
+	ToAddresses []string
+	Amounts     []int64
+}
+
+func (q *Queries) InsertRefunds(ctx context.Context, arg InsertRefundsParams) error {
+	_, err := q.db.Exec(ctx, insertRefunds, arg.DepositIds, arg.ToAddresses, arg.Amounts)
+	return err
+}
+
 const invoicesByAddresses = `-- name: InvoicesByAddresses :many
-SELECT i.id, i.partner_id, i.address, p.fee_bps
+SELECT i.id, i.partner_id, i.address, p.fee_bps, p.fee_fixed
 FROM invoices i
 JOIN partners p ON p.id = i.partner_id
 WHERE i.address = ANY ($1::text[])
@@ -39,6 +298,7 @@ type InvoicesByAddressesRow struct {
 	PartnerID int64
 	Address   string
 	FeeBps    int32
+	FeeFixed  money.Amount
 }
 
 func (q *Queries) InvoicesByAddresses(ctx context.Context, addresses []string) ([]InvoicesByAddressesRow, error) {
@@ -55,6 +315,7 @@ func (q *Queries) InvoicesByAddresses(ctx context.Context, addresses []string) (
 			&i.PartnerID,
 			&i.Address,
 			&i.FeeBps,
+			&i.FeeFixed,
 		); err != nil {
 			return nil, err
 		}
@@ -66,23 +327,80 @@ func (q *Queries) InvoicesByAddresses(ctx context.Context, addresses []string) (
 	return items, nil
 }
 
-const lockCursor = `-- name: LockCursor :one
-SELECT next_block, last_hash
-FROM chain_cursors
-WHERE name = $1
-FOR UPDATE
+const orphanDeposit = `-- name: OrphanDeposit :execrows
+UPDATE deposits
+SET status = 'orphaned', updated_at = now()
+WHERE id = $1 AND status = 'pending' AND block_hash = $2
 `
 
-type LockCursorRow struct {
-	NextBlock int64
-	LastHash  string
+type OrphanDepositParams struct {
+	ID        int64
+	BlockHash string
 }
 
-func (q *Queries) LockCursor(ctx context.Context, name string) (LockCursorRow, error) {
-	row := q.db.QueryRow(ctx, lockCursor, name)
-	var i LockCursorRow
-	err := row.Scan(&i.NextBlock, &i.LastHash)
-	return i, err
+func (q *Queries) OrphanDeposit(ctx context.Context, arg OrphanDepositParams) (int64, error) {
+	result, err := q.db.Exec(ctx, orphanDeposit, arg.ID, arg.BlockHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const pendingDepositsFrom = `-- name: PendingDepositsFrom :many
+SELECT id, block_number, block_hash
+FROM deposits
+WHERE status = 'pending' AND block_number >= $1
+ORDER BY block_number, id
+`
+
+type PendingDepositsFromRow struct {
+	ID          int64
+	BlockNumber int64
+	BlockHash   string
+}
+
+func (q *Queries) PendingDepositsFrom(ctx context.Context, fromBlock int64) ([]PendingDepositsFromRow, error) {
+	rows, err := q.db.Query(ctx, pendingDepositsFrom, fromBlock)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PendingDepositsFromRow
+	for rows.Next() {
+		var i PendingDepositsFromRow
+		if err := rows.Scan(&i.ID, &i.BlockNumber, &i.BlockHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recordAMLResults = `-- name: RecordAMLResults :execrows
+UPDATE deposit_aml_checks a
+SET risk            = r.risk,
+    reason          = r.reason,
+    next_attempt_at = NULL,
+    checked_at      = now()
+FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::text[]) AS risk, unnest($3::text[]) AS reason) r
+WHERE a.deposit_id = r.id AND a.risk = ''
+`
+
+type RecordAMLResultsParams struct {
+	Ids     []int64
+	Risks   []string
+	Reasons []string
+}
+
+func (q *Queries) RecordAMLResults(ctx context.Context, arg RecordAMLResultsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordAMLResults, arg.Ids, arg.Risks, arg.Reasons)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const saveCursor = `-- name: SaveCursor :exec
@@ -102,14 +420,32 @@ func (q *Queries) SaveCursor(ctx context.Context, arg SaveCursorParams) error {
 	return err
 }
 
-const upsertDeposit = `-- name: UpsertDeposit :execrows
+const scheduleAMLRetries = `-- name: ScheduleAMLRetries :exec
+UPDATE deposit_aml_checks a
+SET attempts        = a.attempts + 1,
+    next_attempt_at = now() + make_interval(secs => r.delay_seconds)
+FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::float8[]) AS delay_seconds) r
+WHERE a.deposit_id = r.id AND a.risk = ''
+`
+
+type ScheduleAMLRetriesParams struct {
+	Ids           []int64
+	DelaysSeconds []float64
+}
+
+func (q *Queries) ScheduleAMLRetries(ctx context.Context, arg ScheduleAMLRetriesParams) error {
+	_, err := q.db.Exec(ctx, scheduleAMLRetries, arg.Ids, arg.DelaysSeconds)
+	return err
+}
+
+const upsertDeposit = `-- name: UpsertDeposit :one
 INSERT INTO deposits (
     invoice_id, partner_id, tx_hash, log_index, block_number, block_hash,
-    from_address, to_address, amount, fee_bps
+    from_address, to_address, amount, fee_bps, fee_fixed
 )
 VALUES (
     $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $10
+    $7, $8, $9, $10, $11
 )
 ON CONFLICT (tx_hash, log_index) DO UPDATE
 SET block_number = EXCLUDED.block_number,
@@ -118,6 +454,7 @@ SET block_number = EXCLUDED.block_number,
     updated_at   = now()
 WHERE deposits.status IN ('pending', 'orphaned')
   AND (deposits.status = 'orphaned' OR deposits.block_hash <> EXCLUDED.block_hash)
+RETURNING id
 `
 
 type UpsertDepositParams struct {
@@ -131,10 +468,11 @@ type UpsertDepositParams struct {
 	ToAddress   string
 	Amount      money.Amount
 	FeeBps      int32
+	FeeFixed    money.Amount
 }
 
 func (q *Queries) UpsertDeposit(ctx context.Context, arg UpsertDepositParams) (int64, error) {
-	result, err := q.db.Exec(ctx, upsertDeposit,
+	row := q.db.QueryRow(ctx, upsertDeposit,
 		arg.InvoiceID,
 		arg.PartnerID,
 		arg.TxHash,
@@ -145,9 +483,9 @@ func (q *Queries) UpsertDeposit(ctx context.Context, arg UpsertDepositParams) (i
 		arg.ToAddress,
 		arg.Amount,
 		arg.FeeBps,
+		arg.FeeFixed,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }

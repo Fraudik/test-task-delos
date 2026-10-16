@@ -27,17 +27,22 @@ func (p *Processor) ScanBlocks(ctx context.Context) (int, error) {
 		if err := q.EnsureCursor(ctx, processingdb.EnsureCursorParams{Name: cursorName, NextBlock: int64(p.cfg.StartBlock)}); err != nil {
 			return fmt.Errorf("processing: ensure cursor: %w", err)
 		}
-		cur, err := q.LockCursor(ctx, cursorName)
+		cur, err := q.GetCursor(ctx, cursorName)
 		if err != nil {
-			return fmt.Errorf("processing: lock cursor: %w", err)
+			return fmt.Errorf("processing: get cursor: %w", err)
 		}
 
-		next, lastHash, err := p.checkCursor(ctx, uint64(cur.NextBlock), cur.LastHash)
+		next, lastHash, reorged, err := p.checkCursor(ctx, uint64(cur.NextBlock), cur.LastHash)
 		if err != nil {
 			return err
 		}
+		if reorged {
+			if err := p.recheckPending(ctx, q, next); err != nil {
+				return err
+			}
+		}
 		if next > head {
-			if next == uint64(cur.NextBlock) && lastHash == cur.LastHash {
+			if !reorged {
 				return nil
 			}
 			return saveCursor(ctx, q, next, lastHash)
@@ -64,16 +69,16 @@ func (p *Processor) ScanBlocks(ctx context.Context) (int, error) {
 	return scanned, nil
 }
 
-func (p *Processor) checkCursor(ctx context.Context, next uint64, lastHash string) (uint64, string, error) {
+func (p *Processor) checkCursor(ctx context.Context, next uint64, lastHash string) (uint64, string, bool, error) {
 	if lastHash == "" || next == 0 {
-		return next, lastHash, nil
+		return next, lastHash, false, nil
 	}
 	hash, err := p.chain.BlockHash(ctx, next-1)
 	if err != nil && !errors.Is(err, chain.ErrBlockNotFound) {
-		return 0, "", fmt.Errorf("processing: block hash %d: %w", next-1, err)
+		return 0, "", false, fmt.Errorf("processing: block hash %d: %w", next-1, err)
 	}
 	if err == nil && hash == lastHash {
-		return next, lastHash, nil
+		return next, lastHash, false, nil
 	}
 
 	rewound := p.cfg.StartBlock
@@ -81,11 +86,66 @@ func (p *Processor) checkCursor(ctx context.Context, next uint64, lastHash strin
 		rewound = next - back
 	}
 	p.log.Warn("reorg detected, rescanning", "block", next-1, "rescan_from", rewound)
-	return rewound, "", nil
+	return rewound, "", true, nil
+}
+
+func (p *Processor) recheckPending(ctx context.Context, q *processingdb.Queries, from uint64) error {
+	pending, err := q.PendingDepositsFrom(ctx, int64(from))
+	if err != nil {
+		return fmt.Errorf("processing: pending deposits from %d: %w", from, err)
+	}
+	blocks := make([]int64, len(pending))
+	for i, d := range pending {
+		blocks[i] = d.BlockNumber
+	}
+	hashes, err := p.canonicalHashes(ctx, blocks)
+	if err != nil {
+		return err
+	}
+	for _, d := range pending {
+		if hashes[d.BlockNumber] == d.BlockHash {
+			continue
+		}
+		if _, err := p.orphan(ctx, q, d.ID, d.BlockNumber, d.BlockHash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Processor) canonicalHashes(ctx context.Context, blocks []int64) (map[int64]string, error) {
+	hashes := make(map[int64]string, len(blocks))
+	for _, b := range blocks {
+		if _, ok := hashes[b]; ok {
+			continue
+		}
+		h, err := p.chain.BlockHash(ctx, uint64(b))
+		if err != nil && !errors.Is(err, chain.ErrBlockNotFound) {
+			return nil, fmt.Errorf("processing: block hash %d: %w", b, err)
+		}
+		hashes[b] = h
+	}
+	return hashes, nil
+}
+
+func (p *Processor) orphan(ctx context.Context, q *processingdb.Queries, depositID, block int64, blockHash string) (bool, error) {
+	n, err := q.OrphanDeposit(ctx, processingdb.OrphanDepositParams{ID: depositID, BlockHash: blockHash})
+	if err != nil {
+		return false, fmt.Errorf("processing: orphan deposit %d: %w", depositID, err)
+	}
+	if n > 0 {
+		p.log.Warn("deposit orphaned by reorg", "deposit_id", depositID, "block", block, "block_hash", blockHash)
+	}
+	return n > 0, nil
 }
 
 func saveCursor(ctx context.Context, q *processingdb.Queries, next uint64, lastHash string) error {
-	if err := q.SaveCursor(ctx, processingdb.SaveCursorParams{Name: cursorName, NextBlock: int64(next), LastHash: lastHash}); err != nil {
+	err := q.SaveCursor(ctx, processingdb.SaveCursorParams{
+		Name:      cursorName,
+		NextBlock: int64(next),
+		LastHash:  lastHash,
+	})
+	if err != nil {
 		return fmt.Errorf("processing: save cursor: %w", err)
 	}
 	return nil
@@ -117,7 +177,7 @@ func (p *Processor) recordDeposits(ctx context.Context, q *processingdb.Queries,
 			p.log.Warn("skipping non-positive transfer", "tx", t.TxHash, "log_index", t.LogIndex, "value", int64(t.Value))
 			continue
 		}
-		n, err := q.UpsertDeposit(ctx, processingdb.UpsertDepositParams{
+		id, err := q.UpsertDeposit(ctx, processingdb.UpsertDepositParams{
 			InvoiceID:   inv.ID,
 			PartnerID:   inv.PartnerID,
 			TxHash:      t.TxHash,
@@ -128,13 +188,18 @@ func (p *Processor) recordDeposits(ctx context.Context, q *processingdb.Queries,
 			ToAddress:   inv.Address,
 			Amount:      t.Value,
 			FeeBps:      inv.FeeBps,
+			FeeFixed:    inv.FeeFixed,
 		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("processing: record deposit %s/%d: %w", t.TxHash, t.LogIndex, err)
 		}
-		if n > 0 {
-			p.log.Info("deposit detected", "invoice_id", inv.ID, "tx", t.TxHash, "log_index", t.LogIndex, "block", t.BlockNumber, "amount", int64(t.Value))
+		if err := q.EnsureAMLCheck(ctx, id); err != nil {
+			return fmt.Errorf("processing: schedule AML check for deposit %d: %w", id, err)
 		}
+		p.log.Info("deposit detected", "deposit_id", id, "invoice_id", inv.ID, "tx", t.TxHash, "log_index", t.LogIndex, "block", t.BlockNumber, "amount", int64(t.Value))
 	}
 	return nil
 }
