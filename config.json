@@ -1,0 +1,9 @@
+{
+  "http_addr": ":8080",
+  "confirmations": 5,
+  "aml_blacklist": ["0xbad0000000000000000000000000000000000bad"],
+  "partners": [
+    {"name": "acme", "api_key": "acme-secret-key", "fee_bps": 150, "fee_fixed": "0.5"},
+    {"name": "globex", "api_key": "globex-secret-key", "fee_bps": 100, "fee_fixed": "0"}
+  ]
+}

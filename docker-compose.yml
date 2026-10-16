@@ -5,6 +5,8 @@ services:
       POSTGRES_USER: dellos
       POSTGRES_PASSWORD: dellos
       POSTGRES_DB: dellos
+    volumes:
+      - postgres:/var/lib/postgresql
     ports:
       - "5432:5432"
     healthcheck:
@@ -12,3 +14,20 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://dellos:dellos@postgres:5432/dellos?sslmode=disable
+      SIM_STATE_PATH: /var/lib/dellos/chain.json
+    volumes:
+      - simulator:/var/lib/dellos
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres:
+  simulator:
