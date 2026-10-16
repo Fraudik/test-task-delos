@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"test-task-dellos/internal/money"
@@ -13,7 +14,7 @@ import (
 )
 
 type Notification struct {
-	InvoiceID int64
+	InvoiceID uuid.UUID
 	PartnerID int64
 	Amount    money.Amount
 	Received  money.Amount
@@ -94,7 +95,7 @@ func (n *Notifier) Tick(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("notify: claim notifications: %w", err)
 	}
 	var (
-		done    []int64
+		done    []uuid.UUID
 		retries notifydb.ScheduleNotifyRetriesParams
 	)
 	for _, c := range claimed {

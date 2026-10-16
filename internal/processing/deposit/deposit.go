@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"test-task-dellos/internal/processing/deposit/depositdb"
 )
 
@@ -43,6 +45,6 @@ func (r *Review) Log(log *slog.Logger, stage string) {
 	}
 }
 
-func InvoiceLedgerKey(invoiceID int64, step string) string {
-	return fmt.Sprintf("invoice:%d:%s", invoiceID, step)
+func InvoiceLedgerKey(invoiceID uuid.UUID, step string) string {
+	return fmt.Sprintf("invoice:%s:%s", invoiceID, step)
 }

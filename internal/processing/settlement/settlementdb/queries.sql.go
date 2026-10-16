@@ -8,6 +8,7 @@ package settlementdb
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"test-task-dellos/internal/money"
 )
 
@@ -22,13 +23,13 @@ WHERE i.status = 'open'
     JOIN deposit_aml_checks a ON a.deposit_id = d.id
     WHERE d.invoice_id = i.id AND d.status = 'confirmed' AND a.risk = 'low'
   )
-ORDER BY i.id
+ORDER BY i.created_at, i.id
 LIMIT $1
 FOR UPDATE OF i SKIP LOCKED
 `
 
 type ClaimPaidInvoicesRow struct {
-	ID        int64
+	ID        uuid.UUID
 	PartnerID int64
 	Amount    money.Amount
 	FeeBps    int32
@@ -148,18 +149,18 @@ const lockCleanDeposits = `-- name: LockCleanDeposits :many
 SELECT d.id, d.invoice_id, d.amount
 FROM deposits d
 JOIN deposit_aml_checks a ON a.deposit_id = d.id
-WHERE d.invoice_id = ANY ($1::bigint[]) AND d.status = 'confirmed' AND a.risk = 'low'
+WHERE d.invoice_id = ANY ($1::uuid[]) AND d.status = 'confirmed' AND a.risk = 'low'
 ORDER BY d.id
 FOR UPDATE OF d
 `
 
 type LockCleanDepositsRow struct {
 	ID        int64
-	InvoiceID int64
+	InvoiceID uuid.UUID
 	Amount    money.Amount
 }
 
-func (q *Queries) LockCleanDeposits(ctx context.Context, invoiceIds []int64) ([]LockCleanDepositsRow, error) {
+func (q *Queries) LockCleanDeposits(ctx context.Context, invoiceIds []uuid.UUID) ([]LockCleanDepositsRow, error) {
 	rows, err := q.db.Query(ctx, lockCleanDeposits, invoiceIds)
 	if err != nil {
 		return nil, err
@@ -182,10 +183,10 @@ func (q *Queries) LockCleanDeposits(ctx context.Context, invoiceIds []int64) ([]
 const markInvoicesPaid = `-- name: MarkInvoicesPaid :execrows
 UPDATE invoices
 SET status = 'paid', paid_at = now()
-WHERE id = ANY ($1::bigint[]) AND status = 'open'
+WHERE id = ANY ($1::uuid[]) AND status = 'open'
 `
 
-func (q *Queries) MarkInvoicesPaid(ctx context.Context, ids []int64) (int64, error) {
+func (q *Queries) MarkInvoicesPaid(ctx context.Context, ids []uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, markInvoicesPaid, ids)
 	if err != nil {
 		return 0, err

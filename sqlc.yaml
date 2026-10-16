@@ -2,6 +2,10 @@ version: "2"
 overrides:
   go:
     overrides:
+      - db_type: uuid
+        go_type:
+          import: github.com/google/uuid
+          type: UUID
       - column: ledger_accounts.balance
         go_type: &amount
           import: test-task-dellos/internal/money

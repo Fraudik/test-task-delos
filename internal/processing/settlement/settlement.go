@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -116,7 +117,7 @@ func (s *Stage) lockPaidInvoices(ctx context.Context, q *settlementdb.Queries) (
 	if len(invoices) == 0 {
 		return nil, nil
 	}
-	ids := make([]int64, len(invoices))
+	ids := make([]uuid.UUID, len(invoices))
 	for i, inv := range invoices {
 		ids[i] = inv.ID
 	}
@@ -124,7 +125,7 @@ func (s *Stage) lockPaidInvoices(ctx context.Context, q *settlementdb.Queries) (
 	if err != nil {
 		return nil, fmt.Errorf("settlement: lock invoice deposits: %w", err)
 	}
-	byInvoice := make(map[int64]*paidInvoice, len(invoices))
+	byInvoice := make(map[uuid.UUID]*paidInvoice, len(invoices))
 	paid := make([]paidInvoice, len(invoices))
 	for i, inv := range invoices {
 		paid[i] = paidInvoice{invoice: inv}
@@ -176,7 +177,10 @@ func (o *outcome) apply(ctx context.Context, tx pgx.Tx, q *settlementdb.Queries)
 		}
 	}
 	if len(o.paid) > 0 {
-		var depositIDs, invoiceIDs []int64
+		var (
+			depositIDs []int64
+			invoiceIDs []uuid.UUID
+		)
 		for _, p := range o.paid {
 			depositIDs = append(depositIDs, p.deposits...)
 			invoiceIDs = append(invoiceIDs, p.invoice.ID)

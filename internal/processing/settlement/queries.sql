@@ -18,7 +18,7 @@ WHERE i.status = 'open'
     JOIN deposit_aml_checks a ON a.deposit_id = d.id
     WHERE d.invoice_id = i.id AND d.status = 'confirmed' AND a.risk = 'low'
   )
-ORDER BY i.id
+ORDER BY i.created_at, i.id
 LIMIT @max_rows
 FOR UPDATE OF i SKIP LOCKED;
 
@@ -26,7 +26,7 @@ FOR UPDATE OF i SKIP LOCKED;
 SELECT d.id, d.invoice_id, d.amount
 FROM deposits d
 JOIN deposit_aml_checks a ON a.deposit_id = d.id
-WHERE d.invoice_id = ANY (@invoice_ids::bigint[]) AND d.status = 'confirmed' AND a.risk = 'low'
+WHERE d.invoice_id = ANY (@invoice_ids::uuid[]) AND d.status = 'confirmed' AND a.risk = 'low'
 ORDER BY d.id
 FOR UPDATE OF d;
 
@@ -38,7 +38,7 @@ WHERE id = ANY (@ids::bigint[]) AND status = 'confirmed';
 -- name: MarkInvoicesPaid :execrows
 UPDATE invoices
 SET status = 'paid', paid_at = now()
-WHERE id = ANY (@ids::bigint[]) AND status = 'open';
+WHERE id = ANY (@ids::uuid[]) AND status = 'open';
 
 -- name: InsertRefunds :exec
 INSERT INTO refunds (deposit_id, to_address, amount)

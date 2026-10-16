@@ -15,11 +15,11 @@ RETURNING i.id, i.partner_id, i.amount, i.notify_attempts,
 -- name: MarkNotified :exec
 UPDATE invoices
 SET notified_at = now()
-WHERE id = ANY (@ids::bigint[]) AND notified_at IS NULL;
+WHERE id = ANY (@ids::uuid[]) AND notified_at IS NULL;
 
 -- name: ScheduleNotifyRetries :exec
 UPDATE invoices i
 SET notify_attempts        = i.notify_attempts + 1,
     notify_next_attempt_at = now() + make_interval(secs => r.delay_seconds)
-FROM (SELECT unnest(@ids::bigint[]) AS id, unnest(@delays_seconds::float8[]) AS delay_seconds) r
+FROM (SELECT unnest(@ids::uuid[]) AS id, unnest(@delays_seconds::float8[]) AS delay_seconds) r
 WHERE i.id = r.id AND i.notified_at IS NULL;

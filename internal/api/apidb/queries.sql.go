@@ -8,6 +8,7 @@ package apidb
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"test-task-dellos/internal/money"
 )
@@ -29,7 +30,7 @@ type CreateInvoiceParams struct {
 }
 
 type CreateInvoiceRow struct {
-	ID        int64
+	ID        uuid.UUID
 	Address   string
 	Amount    money.Amount
 	Status    InvoiceStatus
@@ -61,12 +62,12 @@ WHERE id = $1 AND partner_id = $2
 `
 
 type GetInvoiceParams struct {
-	ID        int64
+	ID        uuid.UUID
 	PartnerID int64
 }
 
 type GetInvoiceRow struct {
-	ID        int64
+	ID        uuid.UUID
 	Address   string
 	Amount    money.Amount
 	Status    InvoiceStatus
@@ -98,7 +99,7 @@ type InvoiceByIdempotencyKeyParams struct {
 }
 
 type InvoiceByIdempotencyKeyRow struct {
-	ID        int64
+	ID        uuid.UUID
 	Address   string
 	Amount    money.Amount
 	Status    InvoiceStatus
@@ -139,7 +140,7 @@ type InvoiceDepositsRow struct {
 	AmlRisk     string
 }
 
-func (q *Queries) InvoiceDeposits(ctx context.Context, invoiceID int64) ([]InvoiceDepositsRow, error) {
+func (q *Queries) InvoiceDeposits(ctx context.Context, invoiceID uuid.UUID) ([]InvoiceDepositsRow, error) {
 	rows, err := q.db.Query(ctx, invoiceDeposits, invoiceID)
 	if err != nil {
 		return nil, err

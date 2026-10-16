@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"test-task-dellos/internal/app"
@@ -280,6 +281,11 @@ func TestInvoiceCreationIsIdempotent(t *testing.T) {
 	if other.body["id"] == first.body["id"] || foreign.body["id"] == first.body["id"] {
 		t.Error("different key or partner reused the invoice")
 	}
+	for _, res := range []response{first, other, foreign} {
+		if id, err := uuid.Parse(fmt.Sprint(res.body["id"])); err != nil || id.Version() != 4 {
+			t.Errorf("invoice id %v is not a UUIDv4", res.body["id"])
+		}
+	}
 
 	if res := e.createInvoice(acmeKey, ""); res.status != http.StatusBadRequest {
 		t.Errorf("missing Idempotency-Key = %d, want 400", res.status)
@@ -328,8 +334,10 @@ func TestPartnersAreIsolated(t *testing.T) {
 	if res := e.call(http.MethodGet, "/v1/balance", "wrong-key", nil, nil); res.status != http.StatusUnauthorized {
 		t.Errorf("wrong API key = %d, want 401", res.status)
 	}
-	if res := e.invoice(acmeKey, "999999"); res.status != http.StatusNotFound {
-		t.Errorf("unknown invoice = %d, want 404", res.status)
+	for _, id := range []string{uuid.NewString(), "999999"} {
+		if res := e.invoice(acmeKey, id); res.status != http.StatusNotFound {
+			t.Errorf("unknown invoice %s = %d, want 404", id, res.status)
+		}
 	}
 }
 

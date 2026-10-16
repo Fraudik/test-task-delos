@@ -69,11 +69,15 @@ func scalar(t *testing.T, db *pgxpool.Pool, sql string, args ...any) int64 {
 func seedRefund(t *testing.T, db *pgxpool.Pool) int64 {
 	t.Helper()
 	pid := scalar(t, db, `INSERT INTO partners (name, fee_bps) VALUES ('p-' || gen_random_uuid(), 0) RETURNING id`)
-	inv := scalar(t, db, `INSERT INTO invoices (partner_id, address, amount, fee_bps, fee_fixed) VALUES ($1, '0x' || md5(random()::text), 1000000, 0, 0) RETURNING id`, pid)
 	dep := scalar(t, db, `
+		WITH inv AS (
+			INSERT INTO invoices (partner_id, address, amount, fee_bps, fee_fixed)
+			VALUES ($1, '0x' || md5(random()::text), 1000000, 0, 0)
+			RETURNING id
+		)
 		INSERT INTO deposits (invoice_id, partner_id, tx_hash, log_index, block_number, block_hash, from_address, to_address, amount, status)
-		VALUES ($1, $2, '0x' || md5(random()::text), 0, 1, '0xblock', '0xfrom', '0xto', 1000000, 'refunded')
-		RETURNING id`, inv, pid)
+		SELECT inv.id, $1, '0x' || md5(random()::text), 0, 1, '0xblock', '0xfrom', '0xto', 1000000, 'refunded' FROM inv
+		RETURNING id`, pid)
 	return scalar(t, db, `INSERT INTO refunds (deposit_id, to_address, amount) VALUES ($1, '0xfrom', 1000000) RETURNING id`, dep)
 }
 

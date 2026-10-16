@@ -8,6 +8,7 @@ package notifydb
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"test-task-dellos/internal/money"
 )
 
@@ -32,7 +33,7 @@ type ClaimNotificationsParams struct {
 }
 
 type ClaimNotificationsRow struct {
-	ID             int64
+	ID             uuid.UUID
 	PartnerID      int64
 	Amount         money.Amount
 	NotifyAttempts int32
@@ -68,10 +69,10 @@ func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotifications
 const markNotified = `-- name: MarkNotified :exec
 UPDATE invoices
 SET notified_at = now()
-WHERE id = ANY ($1::bigint[]) AND notified_at IS NULL
+WHERE id = ANY ($1::uuid[]) AND notified_at IS NULL
 `
 
-func (q *Queries) MarkNotified(ctx context.Context, ids []int64) error {
+func (q *Queries) MarkNotified(ctx context.Context, ids []uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markNotified, ids)
 	return err
 }
@@ -80,12 +81,12 @@ const scheduleNotifyRetries = `-- name: ScheduleNotifyRetries :exec
 UPDATE invoices i
 SET notify_attempts        = i.notify_attempts + 1,
     notify_next_attempt_at = now() + make_interval(secs => r.delay_seconds)
-FROM (SELECT unnest($1::bigint[]) AS id, unnest($2::float8[]) AS delay_seconds) r
+FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::float8[]) AS delay_seconds) r
 WHERE i.id = r.id AND i.notified_at IS NULL
 `
 
 type ScheduleNotifyRetriesParams struct {
-	Ids           []int64
+	Ids           []uuid.UUID
 	DelaysSeconds []float64
 }
 

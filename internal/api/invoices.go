@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -23,7 +23,7 @@ type createInvoiceRequest struct {
 }
 
 type invoiceResponse struct {
-	ID        int64             `json:"id"`
+	ID        uuid.UUID         `json:"id"`
 	Address   string            `json:"address"`
 	Amount    string            `json:"amount"`
 	Received  string            `json:"received"`
@@ -49,7 +49,7 @@ type balanceResponse struct {
 }
 
 type invoiceRow struct {
-	ID        int64
+	ID        uuid.UUID
 	Address   string
 	Amount    money.Amount
 	Status    apidb.InvoiceStatus
@@ -104,7 +104,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getInvoice(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "invoice not found")
 		return

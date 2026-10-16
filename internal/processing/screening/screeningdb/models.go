@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"test-task-dellos/internal/money"
 )
@@ -151,7 +152,6 @@ type ChainCursor struct {
 
 type Deposit struct {
 	ID           int64
-	InvoiceID    int64
 	PartnerID    int64
 	TxHash       string
 	LogIndex     int32
@@ -165,6 +165,7 @@ type Deposit struct {
 	UpdatedAt    pgtype.Timestamptz
 	ReviewReason string
 	FlaggedAt    pgtype.Timestamptz
+	InvoiceID    uuid.UUID
 }
 
 type DepositAmlCheck struct {
@@ -177,7 +178,6 @@ type DepositAmlCheck struct {
 }
 
 type Invoice struct {
-	ID                  int64
 	PartnerID           int64
 	Address             string
 	CreatedAt           pgtype.Timestamptz
@@ -190,6 +190,7 @@ type Invoice struct {
 	NotifiedAt          pgtype.Timestamptz
 	NotifyAttempts      int32
 	NotifyNextAttemptAt pgtype.Timestamptz
+	ID                  uuid.UUID
 }
 
 type LedgerAccount struct {

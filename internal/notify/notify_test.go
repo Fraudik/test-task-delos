@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"test-task-dellos/internal/notify"
@@ -16,7 +17,7 @@ import (
 
 type recorder struct {
 	mu    sync.Mutex
-	calls map[int64]int
+	calls map[uuid.UUID]int
 	fail  bool
 }
 
@@ -66,18 +67,23 @@ func scalar(t *testing.T, db *pgxpool.Pool, sql string, args ...any) int64 {
 	return n
 }
 
-func seedInvoice(t *testing.T, db *pgxpool.Pool, status string) int64 {
+func seedInvoice(t *testing.T, db *pgxpool.Pool, status string) uuid.UUID {
 	t.Helper()
 	pid := scalar(t, db, `INSERT INTO partners (name, fee_bps) VALUES ('p-' || gen_random_uuid(), 0) RETURNING id`)
-	return scalar(t, db, `
+	var id uuid.UUID
+	err := db.QueryRow(t.Context(), `
 		INSERT INTO invoices (partner_id, address, amount, fee_bps, fee_fixed, status, paid_at)
 		VALUES ($1, '0x' || md5(random()::text), 1000000, 0, 0, $2::invoice_status, CASE WHEN $2 = 'paid' THEN now() END)
-		RETURNING id`, pid, status)
+		RETURNING id`, pid, status).Scan(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestNotifiesPaidInvoicesOnce(t *testing.T) {
 	db := testdb.New(t)
-	rec := &recorder{calls: map[int64]int{}}
+	rec := &recorder{calls: map[uuid.UUID]int{}}
 	n := newNotifier(t, db, rec)
 	credited := seedInvoice(t, db, "paid")
 	pending := seedInvoice(t, db, "open")
@@ -101,7 +107,7 @@ func TestNotifiesPaidInvoicesOnce(t *testing.T) {
 
 func TestFailedNotificationsAreRetriedWithBackoff(t *testing.T) {
 	db := testdb.New(t)
-	rec := &recorder{calls: map[int64]int{}}
+	rec := &recorder{calls: map[uuid.UUID]int{}}
 	n := newNotifier(t, db, rec)
 	credited := seedInvoice(t, db, "paid")
 
@@ -126,8 +132,8 @@ func TestFailedNotificationsAreRetriedWithBackoff(t *testing.T) {
 
 func TestConcurrentNotifiersCallOnce(t *testing.T) {
 	db := testdb.New(t)
-	rec := &recorder{calls: map[int64]int{}}
-	var invoices []int64
+	rec := &recorder{calls: map[uuid.UUID]int{}}
+	var invoices []uuid.UUID
 	for range 10 {
 		invoices = append(invoices, seedInvoice(t, db, "paid"))
 	}

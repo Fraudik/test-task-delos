@@ -8,6 +8,7 @@ package scannerdb
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"test-task-dellos/internal/money"
 )
 
@@ -63,7 +64,7 @@ WHERE i.address = ANY ($1::text[])
 `
 
 type InvoicesByAddressesRow struct {
-	ID        int64
+	ID        uuid.UUID
 	PartnerID int64
 	Address   string
 }
@@ -177,7 +178,7 @@ RETURNING id
 `
 
 type UpsertDepositParams struct {
-	InvoiceID   int64
+	InvoiceID   uuid.UUID
 	PartnerID   int64
 	TxHash      string
 	LogIndex    int32

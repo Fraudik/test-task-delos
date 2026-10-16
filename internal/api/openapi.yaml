@@ -40,7 +40,7 @@ paths:
         - in: path
           name: id
           required: true
-          schema: {type: integer, format: int64}
+          schema: {type: string, format: uuid}
       responses:
         "200": {description: Invoice, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
         "401": {$ref: "#/components/responses/Error"}
@@ -188,7 +188,7 @@ components:
     Invoice:
       type: object
       properties:
-        id: {type: integer, format: int64}
+        id: {type: string, format: uuid, example: 6f1c2b8e-3d4a-4e5f-9a7b-1c2d3e4f5a6b}
         address: {type: string}
         amount: {type: string, example: "100.000000"}
         received:
