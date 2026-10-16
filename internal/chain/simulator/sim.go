@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"test-task-dellos/internal/chain"
@@ -118,12 +120,87 @@ func (s *Simulator) AddBlocks(n int) uint64 {
 
 // Reorg drops the last depth blocks and replaces them with depth+1 new blocks
 func (s *Simulator) Reorg(depth int) (uint64, error) {
+	return s.reorg(depth, false)
+}
+
+// ReorgWithReinclusion is Reorg that mines the transfers of the dropped blocks again into the first new block
+func (s *Simulator) ReorgWithReinclusion(depth int) (uint64, error) {
+	return s.reorg(depth, true)
+}
+
+func (s *Simulator) reorg(depth int, reinclude bool) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if depth <= 0 || depth >= len(s.blocks) {
 		return 0, fmt.Errorf("simulator: invalid reorg depth %d (head %d)", depth, s.headLocked())
 	}
+	dropped := s.blocks[len(s.blocks)-depth:]
 	s.blocks = s.blocks[:len(s.blocks)-depth]
-	s.addBlocksLocked(depth + 1)
+	var transfers []chain.Transfer
+	if reinclude {
+		for _, b := range dropped {
+			transfers = append(transfers, b.transfers...)
+		}
+	}
+	s.createBlock(transfers)
+	s.addBlocksLocked(depth)
 	return s.headLocked(), nil
+}
+
+type snapshot struct {
+	Counter uint64          `json:"counter"`
+	Blocks  []snapshotBlock `json:"blocks"`
+}
+
+type snapshotBlock struct {
+	Number    uint64           `json:"number"`
+	Hash      string           `json:"hash"`
+	Parent    string           `json:"parent"`
+	Transfers []chain.Transfer `json:"transfers"`
+}
+
+// SaveFile writes the chain to path atomically, so a restarted service continues the same chain
+func (s *Simulator) SaveFile(path string) error {
+	s.mu.RLock()
+	snap := snapshot{Counter: s.counter, Blocks: make([]snapshotBlock, len(s.blocks))}
+	for i, b := range s.blocks {
+		snap.Blocks[i] = snapshotBlock{Number: b.number, Hash: b.hash, Parent: b.parent, Transfers: b.transfers}
+	}
+	s.mu.RUnlock()
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return fmt.Errorf("simulator: encode state: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("simulator: write state: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("simulator: replace state: %w", err)
+	}
+	return nil
+}
+
+// LoadFile restores a chain saved by SaveFile; a missing file gives a new chain
+func LoadFile(path string) (*Simulator, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return New(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("simulator: read state: %w", err)
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, fmt.Errorf("simulator: decode state: %w", err)
+	}
+	if len(snap.Blocks) == 0 {
+		return nil, errors.New("simulator: state has no blocks")
+	}
+	s := &Simulator{counter: snap.Counter, blocks: make([]*block, len(snap.Blocks))}
+	for i, b := range snap.Blocks {
+		s.blocks[i] = &block{number: b.Number, hash: b.Hash, parent: b.Parent, transfers: b.Transfers}
+	}
+	return s, nil
 }

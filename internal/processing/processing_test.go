@@ -861,3 +861,38 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		t.Error("New accepted invalid config")
 	}
 }
+
+func TestReincludedTransferIsCreditedOnce(t *testing.T) {
+	e := newEnv(t)
+	pid := e.partner(0)
+	tr := e.send(payer, e.invoice(pid), 5*money.OneUSDT)
+	e.sim.AddBlocks(1)
+	e.tick()
+	e.assertStatus(tr, "pending")
+
+	if _, err := e.sim.ReorgWithReinclusion(2); err != nil {
+		t.Fatal(err)
+	}
+	e.tick()
+	e.assertStatus(tr, "pending")
+	var block int64
+	var hash string
+	if err := e.db.QueryRow(t.Context(), `SELECT block_number, block_hash FROM deposits WHERE tx_hash = $1`, tr.TxHash).Scan(&block, &hash); err != nil {
+		t.Fatal(err)
+	}
+	if hash == tr.BlockHash {
+		t.Error("deposit still points at the orphaned block")
+	}
+
+	e.sim.AddBlocks(5)
+	e.tick()
+	e.tick()
+	e.assertStatus(tr, "credited")
+	if n := e.count(`SELECT count(*) FROM deposits`); n != 1 {
+		t.Errorf("%d deposits, want 1", n)
+	}
+	if n := e.count(`SELECT count(*) FROM ledger_transactions`); n != 2 {
+		t.Errorf("%d ledger transactions, want 2", n)
+	}
+	e.assertBalances(map[ledger.Account]money.Amount{ledger.PartnerAvailable(pid): 5 * money.OneUSDT, ledger.PartnerHold(pid): 0})
+}

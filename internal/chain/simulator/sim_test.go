@@ -369,3 +369,64 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Errorf("got %d transfers, want 200", len(trs))
 	}
 }
+
+func TestReorgWithReinclusion(t *testing.T) {
+	s := New()
+	tr := mustSend(t, s, "a", "b", 7)
+	s.AddBlocks(1)
+
+	head, err := s.ReorgWithReinclusion(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != 3 {
+		t.Errorf("head = %d, want 3", head)
+	}
+	trs := mustTransfers(t, s, 0, head)
+	if len(trs) != 1 {
+		t.Fatalf("got %d transfers after reorg, want 1", len(trs))
+	}
+	got := trs[0]
+	if got.TxHash != tr.TxHash || got.Value != tr.Value || got.From != tr.From || got.To != tr.To || got.LogIndex != 0 {
+		t.Errorf("re-included transfer = %+v, want same tx as %+v", got, tr)
+	}
+	if got.BlockHash == tr.BlockHash || got.BlockHash != mustHash(t, s, got.BlockNumber) {
+		t.Errorf("re-included transfer block hash = %s, want the new canonical block", got.BlockHash)
+	}
+}
+
+func TestSaveAndLoadFile(t *testing.T) {
+	path := t.TempDir() + "/chain.json"
+	s := New()
+	tr := mustSend(t, s, "a", "b", 42)
+	s.AddBlocks(3)
+	if err := s.SaveFile(path); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustHead(t, loaded) != mustHead(t, s) {
+		t.Errorf("head after load = %d, want %d", mustHead(t, loaded), mustHead(t, s))
+	}
+	for n := uint64(0); n <= mustHead(t, s); n++ {
+		if mustHash(t, loaded, n) != mustHash(t, s, n) {
+			t.Errorf("block %d hash differs after load", n)
+		}
+	}
+	trs := mustTransfers(t, loaded, 0, mustHead(t, loaded))
+	if len(trs) != 1 || trs[0] != tr {
+		t.Errorf("transfers after load = %+v, want %+v", trs, tr)
+	}
+	next := mustSend(t, loaded, "a", "b", 1)
+	if next.TxHash == tr.TxHash {
+		t.Error("loaded simulator reuses hashes")
+	}
+
+	fresh, err := LoadFile(t.TempDir() + "/missing.json")
+	if err != nil || mustHead(t, fresh) != 0 {
+		t.Errorf("LoadFile(missing) = head %d, %v; want a new chain", mustHead(t, fresh), err)
+	}
+}
